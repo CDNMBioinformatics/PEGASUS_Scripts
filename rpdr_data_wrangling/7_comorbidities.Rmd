@@ -1,0 +1,215 @@
+---
+title: "PEGASUS Comorbidities"
+author: "MHuang"
+date: "11/16/2020"
+output:   
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "readxl", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+```
+
+# 1. Read in subject list
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+dia <- fread(str_c(rpdr_file_header, "Dia", rpdr_file_ending))
+dia[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+dia[, Date := as.Date(Date, format = "%m/%d/%Y")]
+
+dia <- merge(dia, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+dia[, dia_timegap_d := as.numeric(Collect_Date - Date)]
+dia[, dia_timegap_y := dia_timegap_d/365.25]
+dia[, summary(dia_timegap_y)]
+
+dia_trim <- dia[Date <= Collect_Date, ]
+dia_trim_condensed <- dia_trim %>% group_by(Diagnosis_Name, Code_Type, Code) %>% summarise() %>% as.data.table()
+
+```
+
+# 2. Comorbidities
+
+```{r}
+
+datatable(dia_trim_condensed, filter = "top")
+
+```
+
+## 2.1. COPD
+
+```{r}
+
+copd_nm <- dia_trim_condensed[grepl("(?i)chronic obstructive lung disease|chronic obstructive pulmonary disease", 
+                                    Diagnosis_Name), unique(Diagnosis_Name)]
+copd_nm
+copd_count <- dia_trim[Diagnosis_Name %in% copd_nm, .N, EMPI]
+copd_empi <- copd_count[N >= 5, EMPI]; length(copd_empi) # Subjects with >=5 COPD diagnoses
+all_subj[, copd_5 := ifelse(EMPI %in% copd_empi, 1, 0)]
+
+```
+
+## 2.2. Alpha-1-antitrypsin deficiency (leads to early onset COPD)
+
+```{r}
+
+a1ad_nm <- dia_trim_condensed[grepl("(?i)antitrypsin", Diagnosis_Name), unique(Diagnosis_Name)]
+a1ad_nm
+a1ad_empi <- dia_trim[Diagnosis_Name %in% a1ad_nm, unique(EMPI)]; length(a1ad_empi)
+all_subj[, .N, .(EMPI %in% a1ad_empi, copd_5)][order(EMPI, copd_5)]
+all_subj[, a1ad := ifelse(EMPI %in% a1ad_empi, 1, 0)]
+
+```
+
+## 2.3. Cystic fibrosis
+
+```{r}
+
+cf_nm <- dia_trim_condensed[grepl("(?i)cystic fibrosis", Diagnosis_Name), ][!grepl("(?i)screening|carrier", Diagnosis_Name), 
+                                                                            unique(Diagnosis_Name)]
+cf_nm
+cf_empi <- dia_trim[Diagnosis_Name %in% cf_nm, unique(EMPI)]; length(cf_empi)
+all_subj[, .N, .(EMPI %in% cf_empi, copd_5)][order(EMPI, copd_5)]
+all_subj[, cf := ifelse(EMPI %in% cf_empi, 1, 0)]
+
+```
+
+## 2.4. Bronchiectasis
+
+```{r}
+
+bronchiectasis_nm <- dia_trim_condensed[grepl("(?i)bronchiectasis", Diagnosis_Name), unique(Diagnosis_Name)]
+bronchiectasis_nm
+bronchiectasis_empi <- dia_trim[Diagnosis_Name %in% bronchiectasis_nm, unique(EMPI)]; length(bronchiectasis_empi)
+all_subj[, bronchiectasis := ifelse(EMPI %in% bronchiectasis_empi, 1, 0)]
+
+```
+
+## 2.5. Chronic bronchitis
+
+```{r}
+
+cbronchitis_nm <- dia_trim_condensed[grepl("(?i)chronic bronchitis", Diagnosis_Name), unique(Diagnosis_Name)]
+cbronchitis_nm
+cbronchitis_empi <- dia_trim[Diagnosis_Name %in% cbronchitis_nm, unique(EMPI)]; length(cbronchitis_empi)
+all_subj[, cbronchitis := ifelse(EMPI %in% cbronchitis_empi, 1, 0)]
+
+```
+
+## 2.6. Immune deficiencies
+
+```{r}
+
+immunodef_nm <- dia_trim_condensed[grepl("(?i)immunodeficiency", Diagnosis_Name), ][!grepl("(?i)exposure|screening|family history", 
+                                                                                           Diagnosis_Name), unique(Diagnosis_Name)]
+immunodef_nm
+immunodef_empi <- dia_trim[Diagnosis_Name %in% immunodef_nm, unique(EMPI)]; length(immunodef_empi)
+all_subj[, immunodef := ifelse(EMPI %in% immunodef_empi, 1, 0)]
+
+all_subj[copd_5 == 1 | a1ad == 1 | cf == 1 | bronchiectasis == 1 | cbronchitis == 1, ] %>% nrow()
+
+```
+
+## 2.7. Pulmonary hypertension
+
+```{r}
+
+pulhtn_nm <- dia_trim_condensed[grepl("(?i)pulmonary", Diagnosis_Name), ][grepl("(?i)hypertension", Diagnosis_Name), 
+                                                                          unique(Diagnosis_Name)]
+pulhtn_nm
+pulhtn_empi <- dia_trim[Diagnosis_Name %in% pulhtn_nm, unique(EMPI)]; length(pulhtn_empi)
+all_subj[, pulhtn := ifelse(EMPI %in% pulhtn_empi, 1, 0)]
+
+```
+
+## 2.8. Allergic rhinitis
+
+```{r}
+
+arhinitis_nm <- dia_trim_condensed[grepl("(?i)allergic rhinitis", Diagnosis_Name), unique(Diagnosis_Name)]
+arhinitis_nm
+arhinitis_empi <- dia_trim[Diagnosis_Name %in% arhinitis_nm, unique(EMPI)]; length(arhinitis_empi)
+all_subj[, arhinitis := ifelse(EMPI %in% arhinitis_empi, 1, 0)]
+
+```
+
+## 2.9. Congestive heart failure 
+
+```{r}
+
+chf_nm <- dia_trim_condensed[grepl("(?i)heart failure", Diagnosis_Name), ][grepl("(?i)congestive", Diagnosis_Name), 
+                                     ][!grepl("(?i)without", Diagnosis_Name), unique(Diagnosis_Name)]
+chf_nm
+chf_empi <- dia_trim[Diagnosis_Name %in% chf_nm, unique(EMPI)]; length(chf_empi)
+all_subj[, chf := ifelse(EMPI %in% chf_empi, 1, 0)]
+
+```
+
+## 2.10. Acid reflux
+
+```{r}
+
+gerd_nm <- dia_trim_condensed[grepl("(?i)esophageal reflux|acid reflux", Diagnosis_Name), unique(Diagnosis_Name)]
+gerd_nm
+gerd_empi <- dia_trim[Diagnosis_Name %in% gerd_nm, unique(EMPI)]; length(gerd_empi)
+all_subj[, gerd := ifelse(EMPI %in% gerd_empi, 1, 0)]
+
+```
+
+# 3. Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+fwrite(all_subj[, .(EMPI, copd_5, a1ad, cf, bronchiectasis, cbronchitis, immunodef, pulhtn, arhinitis, chf, gerd)], 
+       file = here(dat_dir, "comorbidities_of_interest.csv"))
+
+```
+
+# 4. Session info
+
+```{r}
+
+sessionInfo()
+
+```

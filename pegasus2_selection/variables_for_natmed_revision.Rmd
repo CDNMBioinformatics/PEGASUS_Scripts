@@ -1,0 +1,490 @@
+---
+title: "Excerbation variables"
+subtitle: "For Priya"
+author: "MHuang"
+date: "3/20/2021"
+output:   
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra", "readxl")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+asthma_rpdr_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/Asthma/RPDR_Downloads/2020-06-30/"
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/rpdr_data/"
+
+dat_dir <- "data/"
+fig_dir <- "figures/"
+res_dir <- "results/"
+
+
+## File names
+
+pool_fname <- here(res_dir, "selection_pool.csv")
+rpdr_file_header <- str_c(asthma_rpdr_dir, "mns43_063020114847776198_")
+rpdr_file_ending <- ".txt"
+med_map_fname <- str_c(pegasus_dir, "Medication_Mapping.xlsx")
+
+
+## Hard-coded numbers 
+
+sig_digits <- 3
+
+```
+
+# 1. Exacerbations post last plasma date
+## 1.1. Subject selection pool & diagnosis data
+
+```{r}
+
+pool <- fread(pool_fname); nrow(pool)
+pool[, ':='(first_plasma_date = as.Date(first_plasma_date, format = "%Y-%m-%d"), 
+            last_plasma_date = as.Date(last_plasma_date, format = "%Y-%m-%d"))]
+
+dia <- fread(str_c(rpdr_file_header, "Dia", rpdr_file_ending), quote = "")
+dia[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+dia <- dia[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+dia[, Date := as.Date(Date, format = "%m/%d/%Y")]
+dia[, summary(Date)]
+
+dia <- merge(dia, pool[, .(EMPI, first_plasma_date, last_plasma_date)], by = "EMPI", all.x = T)
+dia[, ':='(dia_timegap_to1st_d = as.numeric(Date - first_plasma_date), 
+           dia_timegap_tolast_d = as.numeric(Date - last_plasma_date))]
+dia[, ':='(dia_timegap_to1st_y = dia_timegap_to1st_d/365.25, 
+           dia_timegap_tolast_y = dia_timegap_tolast_d/365.25)]
+dia[, summary(dia_timegap_to1st_y)]; dia[, summary(dia_timegap_tolast_y)]
+dia[, .N, dia_timegap_to1st_d == dia_timegap_tolast_d]
+
+dia_condensed <- unique(dia[, .(Diagnosis_Name, Code_Type, Code)])
+
+```
+
+## 1.2. Asthma exacerbations data
+
+> Status asthmaticus is a medical emergency, an extreme form of asthma exacerbation characterized by hypoxemia, hypercarbia, and secondary respiratory failure (Ref: [NCBI Book](https://www.ncbi.nlm.nih.gov/books/NBK526070/)). 
+
+```{r}
+
+dia_condensed[grep("asthma", Diagnosis_Name, ignore.case = T), 
+              ][grep("exacer|asthmaticus", Diagnosis_Name, ignore.case = T), ] %>% datatable()
+dia_asth_exac_icd10 <- dia_condensed[grep("asthma", Diagnosis_Name, ignore.case = T), 
+                                     ][grep("exacer|asthmaticus", Diagnosis_Name, ignore.case = T), 
+                                       ][Code_Type == "ICD10", ]
+dia_asth_exac_icd10[, Diagnosis_Name := gsub("[(),]", "", 
+                                             gsub(" ", "_", Diagnosis_Name))]
+
+
+## There may be multiple records for the same person on the same day
+
+asth_exac <- dia[grep("asthma", Diagnosis_Name, ignore.case = T), 
+                 ][grep("exacer|with status asthmaticus", Diagnosis_Name, ignore.case = T), ]
+asth_exac <- unique(asth_exac[, .(EMPI, Date, Diagnosis_Name, Code_Type, Code, 
+                                  last_plasma_date, dia_timegap_tolast_d, dia_timegap_tolast_y)])
+asth_exac[, Diagnosis_Name := gsub("[(),]", "", 
+                                   gsub(" ", "_", Diagnosis_Name))]
+
+```
+
+## 1.3. Generate relevant variables on or post last plasma date
+
+```{r}
+
+dia_asth_exac_icd10$Diagnosis_Name
+exac_tmp <- asth_exac[dia_timegap_tolast_y >= 0, ]
+
+exac_vars_fnc <- function() {
+        
+        dat <- pool[, .(EMPI, Biobank_Subject_ID, asthma_existence, asthma_ppv, first_plasma_date, last_plasma_date)]
+
+        # This restrict data to those on or post last plasma date
+
+        for (e in dia_asth_exac_icd10$Diagnosis_Name) {
+                
+                tmp_per_subj <- exac_tmp[Diagnosis_Name == e, ][, .(event_counts = .N, 
+                                                                    event_dates = str_c(Date, collapse = ";"), 
+                                                                    event_1st_date = min(Date)), 
+                                                                EMPI]
+                dat <- merge(dat, tmp_per_subj, by = "EMPI", all.x = T)
+                dat[, ':='(Any_event = ifelse(!is.na(event_counts), 1, 0), 
+                           Days_to_1st_event = as.numeric(event_1st_date - last_plasma_date))]
+                
+                setnames(dat, gsub("event", e, colnames(dat)))
+                setnames(dat, grep(e, colnames(dat), value = T), 
+                         str_c("Dia_PostDate_", grep(e, colnames(dat), value = T)))
+        }
+
+        return(dat)
+}
+
+exac_dat <- exac_vars_fnc()
+
+fwrite(exac_dat, file = here(res_dir, "exacerbation_data_post_last_plasma_date_all_subjects.csv"))
+
+```
+
+Column names example:
+
+ - Dia_PostDate_Unspecified_asthma_with_acute_exacerbation_counts: number of exacerbations recorded on or post last plasma data
+ - Dia_PostDate_Unspecified_asthma_with_acute_exacerbation_dates: dates of exacerbations recorded on or post last plasma data
+ - Dia_PostDate_Unspecified_asthma_with_acute_exacerbation_1st_date: date of first exacerbation recorded on or post last plasma data
+ - Dia_PostDate_Any_Unspecified_asthma_with_acute_exacerbation: existence of this type pf exacerbation (1=yes; 0=no) on or post last plasma data
+ - Dia_PostDate_Days_to_1st_Unspecified_asthma_with_acute_exacerbation: number of days from last plasma date to date of first exacerbation
+
+
+# 2. Time in RPDR up to first plasma date
+
+Based on diagnosis since we don't have encounters data
+
+```{r}
+
+setkey(dia, EMPI, dia_timegap_to1st_d)
+dia_1st_rec <- dia[, head(.SD, 1), EMPI]
+dia_1st_rec[, ':='(days_in_rpdr_dia = abs(dia_timegap_to1st_d), 
+                   years_in_rpdr_dia = abs(dia_timegap_to1st_y))]
+
+```
+
+# 3. Lab test data before first plasma date
+
+```{r}
+
+lab <- fread(str_c(rpdr_file_header, "Lab", rpdr_file_ending), quote = "")
+lab[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+lab <- lab[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+lab[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+lab[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                    Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+lab[, summary(Lab_Date)]
+
+lab <- merge(lab, pool[, .(EMPI, first_plasma_date, last_plasma_date)], by = "EMPI", all.x = T)
+lab[, ':='(lab_timegap_to1st_d = as.numeric(Lab_Date - first_plasma_date), 
+           lab_timegap_tolast_d = as.numeric(Lab_Date - last_plasma_date))]
+lab[, ':='(lab_timegap_to1st_y = lab_timegap_to1st_d/365.25, 
+           lab_timegap_tolast_y = lab_timegap_tolast_d/365.25)]
+lab[, summary(lab_timegap_to1st_y)]; lab[, summary(lab_timegap_tolast_y)]
+lab[, .N, lab_timegap_to1st_d == lab_timegap_tolast_d]
+
+lab_condensed <- unique(lab[, .(Group_Id, Loinc_Code, Test_Id, Test_Description, Specimen_Type)])
+
+```
+
+## 3.1. Eosinophil 
+
+```{r}
+
+lab_condensed[grepl("(?i)eos", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)eos", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+eos_code <- unique(lab_condensed[grepl("(?i)eos", Group_Id), Loinc_Code])
+
+eos_long <- lab[Loinc_Code %in% eos_code, ]
+eos_long[, .N, Reference_Units][order(-N)]
+eos_long[, eos := case_when(Reference_Units %in% c("K/uL", "K3/UL", "th/cmm", "th/mm3", "K/UL", "K/MM3", "") ~ as.numeric(Result), 
+                            Reference_Units %in% c("/cumm", "/(MM3)", "/CUMM", "UL", "/uL") ~ as.numeric(Result)*0.001)
+         ][, eos_unit := "K/uL"] # Unify to K/uL
+eos_long[is.na(eos), .N, Result] %>% datatable()
+eos_long[, summary(eos)] 
+
+eos_long <- eos_long[!is.na(eos), ]
+eos_long[, length(unique(EMPI))]
+
+
+## Function to generate variables on eos under certain restriction
+
+eos_vars_fnc <- function(restriction, varname_suffix) {
+        eos_tmp <- eval(parse(text = str_c("eos_long[", restriction, ", ]")))
+        eos_per_subj <- eos_tmp[, .(n_eos_rec = .N, 
+                                    eos_all_values = str_c(eos, collapse = ";"), 
+                                    eos_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                    eos_median = median(eos), 
+                                    eos_min = min(eos), 
+                                    eos_max = max(eos), 
+                                    eos_mean = mean(eos)), EMPI]
+        
+        setkey(eos_tmp, EMPI, lab_timegap_to1st_d)
+        eos_closest <- eos_tmp[, tail(.SD, 1), EMPI]
+        setnames(eos_closest, c("eos", "lab_timegap_to1st_d"), 
+                              c("eos_closest", "eos_closest_days_to1st"))
+        
+        eos_per_subj <- merge(eos_per_subj, 
+                              eos_closest[, .(EMPI, eos_closest, eos_closest_days_to1st, eos_unit)], 
+                              by = "EMPI")
+        setnames(eos_per_subj, c("EMPI", str_c(colnames(eos_per_subj)[-1], varname_suffix)))
+        return(eos_per_subj)
+}
+
+
+## Generate variables on eos records from within 5/2/1 years before first plasma date
+
+dat <- pool[, .(EMPI, Biobank_Subject_ID, asthma_existence, asthma_ppv, first_plasma_date, last_plasma_date)]
+eos_ige_dat <- merge(dat, 
+                     eos_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -5", 
+                     varname_suffix = "_5ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+eos_ige_dat <- merge(eos_ige_dat, 
+                     eos_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -2", 
+                     varname_suffix = "_2ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+eos_ige_dat <- merge(eos_ige_dat, 
+                     eos_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -1", 
+                     varname_suffix = "_1ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+
+```
+
+## 3.2. IgE 
+
+```{r}
+
+lab_condensed[grepl("(?i)ige", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)ige", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+ige_code <- unique(lab_condensed[grepl("(?i)ige", Group_Id), Loinc_Code])
+
+ige_long <- lab[Loinc_Code %in% ige_code, ]
+ige_long[, .N, Reference_Units][order(-N)]
+ige_long[, ige := case_when(Reference_Units %in% c("IU/ml", "IU/mL", "kU/L", "IU/ML", "U/ML", "", "mg/dl") ~ as.numeric(Result), 
+                            # those with mg/dl as unit has the same reference range as IU/ml (0-100)
+                            Reference_Units %in% c("ng/ml") ~ as.numeric(Result)/2.4) # Ref: PMC3206235
+         ][, ige_unit := "kU/L"] # Unify to kU/L
+ige_long[is.na(ige), .N, Result] %>% datatable()
+ige_long[, summary(ige)] 
+
+ige_long <- ige_long[!is.na(ige), ]
+ige_long[, length(unique(EMPI))]
+
+
+## Function to generate variables on eos under certain restriction
+
+ige_vars_fnc <- function(restriction, varname_suffix) {
+        ige_tmp <- eval(parse(text = str_c("ige_long[", restriction, ", ]")))
+        ige_per_subj <- ige_tmp[, .(n_ige_rec = .N, 
+                                    ige_all_values = str_c(ige, collapse = ";"), 
+                                    ige_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                    ige_median = median(ige), 
+                                    ige_min = min(ige), 
+                                    ige_max = max(ige), 
+                                    ige_mean = mean(ige)), EMPI]
+        
+        setkey(ige_tmp, EMPI, lab_timegap_to1st_d)
+        ige_closest <- ige_tmp[, tail(.SD, 1), EMPI]
+        setnames(ige_closest, c("ige", "lab_timegap_to1st_d"), 
+                              c("ige_closest", "ige_closest_days_to1st"))
+        
+        ige_per_subj <- merge(ige_per_subj, 
+                              ige_closest[, .(EMPI, ige_closest, ige_closest_days_to1st, ige_unit)], 
+                              by = "EMPI")
+        setnames(ige_per_subj, c("EMPI", str_c(colnames(ige_per_subj)[-1], varname_suffix)))
+        return(ige_per_subj)
+}
+
+
+## Generate variables on ige records from within 5/2/1 years before first plasma date
+
+eos_ige_dat <- merge(eos_ige_dat, 
+                     ige_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -5", 
+                     varname_suffix = "_5ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+eos_ige_dat <- merge(eos_ige_dat, 
+                     ige_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -2", 
+                     varname_suffix = "_2ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+eos_ige_dat <- merge(eos_ige_dat, 
+                     ige_vars_fnc(restriction = "lab_timegap_to1st_d <= 0 & lab_timegap_to1st_d >= -1", 
+                     varname_suffix = "_1ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+
+```
+
+## 3.3. Save data 
+
+```{r}
+
+eos_ige_dat <- merge(eos_ige_dat, 
+                     dia_1st_rec[, .(EMPI, days_in_rpdr_dia, years_in_rpdr_dia)], 
+                     by = "EMPI", all.x = T)
+fwrite(eos_ige_dat, file = here(res_dir, "eos_ige_data_before_first_plasma_date_all_subjects.csv"))
+
+```
+
+Column names (same for eos/ige) in eos_ige_dat: 
+
+ - n_eos_rec: number of eosinophil records within specified time frame
+ - eos_all_values: all available eosinophil counts within specified time frame
+ - eos_all_dates: all dates of eosinophil records within specified time frame
+ - eos_median: median of all eosinophil counts within specified time frame
+ - eos_min: minimum of all eosinophil counts within specified time frame
+ - eos_max: maximum of all eosinophil counts within specified time frame
+ - eos_mean: mean of all eosinophil counts within specified time frame
+ - eos_closest: eosinophil count closest to first plasma date within specified time frame
+ - eos_closest_days_to1st: number of days between closest eosinophil record and first plasma date within specified time frame
+ - eos_unit: unit of eosinophil count
+ - days_in_rpdr_dia: days from first diagnosis record to first plasma collection date
+ - years_in_rpdr_dia: days_in_rpdr_dia/365.25
+
+Suffix (to specify time frame):
+
+ - _5ybf_1stplasma: five years before first plasma collection date
+ - _2ybf_1stplasma: two years before first plasma collection date
+ - _1ybf_1stplasma: one year before first plasma collection date
+
+# 4. Medication data
+
+```{r}
+
+med <- fread(str_c(rpdr_file_header, "Med", rpdr_file_ending))
+med[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+med <- med[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+med[, Medication_Date := as.Date(Medication_Date, format = "%m/%d/%Y")]
+med[, summary(Medication_Date)]
+
+med <- merge(med, pool[, .(EMPI, first_plasma_date, last_plasma_date)], by = "EMPI", all.x = T)
+med[, ':='(med_timegap_to1st_d = as.numeric(Medication_Date - first_plasma_date), 
+           med_timegap_tolast_d = as.numeric(Medication_Date - last_plasma_date))]
+med[, ':='(med_timegap_to1st_y = med_timegap_to1st_d/365.25, 
+           med_timegap_tolast_y = med_timegap_tolast_d/365.25)]
+med[, summary(med_timegap_to1st_y)]; med[, summary(med_timegap_tolast_y)]
+med[, .N, med_timegap_to1st_d == med_timegap_tolast_d]
+
+```
+
+## 4.1. Parse out corticosteroids
+
+```{r}
+
+## Mapping file for medications of interest
+
+med_map <- read_xlsx(med_map_fname) %>% as.data.table()
+med_map_cs <- med_map[Medication_GWAS_Group %in% c("Oral Corticosteroids", "Inhaled Corticosteroids", 
+                                                   "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                        Medication_Pegasus_Group %in% c("Oral Steroids", "Inhaled Steroids", "Cortisone", 
+                                                        "Hydrocortisone"), ]
+datatable(med_map_cs[, .(Medication_Name, Medication_GWAS_Group, Medication_Pegasus_Group, 
+                         ICS_or_ICS_LABA, Medication_Biobank_Folder)])
+
+med_condensed <- med %>% group_by(Medication) %>% summarise()
+med_all_subgroups <- data.frame(Medication = character(),
+                                Medication_Name = character(),
+                                Medication_Biobank_Folder = character(),
+                                Medication_GWAS_Group = character(),
+                                Medication_Pegasus_Group = character())
+for (m in 1:nrow(med_map_cs)) {
+        med_subSampleGroup <- med_condensed %>% filter(grepl(med_map_cs[m, ]$Search_Term,
+                                                             Medication,
+                                                             ignore.case = med_map_cs[m, ]$Ignore.case,
+                                                             perl = med_map_cs[m, ]$Perl)) %>%
+                mutate(Medication_Name  = med_map_cs[m, ]$Medication_Name,
+                       Medication_Biobank_Folder = med_map_cs[m, ]$Medication_Biobank_Folder,
+                       Medication_GWAS_Group = med_map_cs[m, ]$Medication_GWAS_Group,
+                       Medication_Pegasus_Group = med_map_cs[m, ]$Medication_Pegasus_Group)
+        med_all_subgroups <- rbind(med_all_subgroups, med_subSampleGroup)
+        rm(med_subSampleGroup)
+}
+med_all_subgroups <- as.data.table(med_all_subgroups)
+
+
+## Remove duplicated records
+
+med_all_subgroups[Medication %in% med_all_subgroups[duplicated(Medication), Medication], ]
+med_all_subgroups <- med_all_subgroups[!(grepl("Pulmicort flexhaler 180 mcg", Medication) &
+                                           Medication_Name == "Dexamethasone")]
+med_all_subgroups <- med_all_subgroups[!(grepl("Id-Fluticasone Or Fluticasone/Salmeterol", Medication) &
+                                           Medication_Name == "Fluticasone/salmeterol")]
+
+
+## Add indicator for ICS/OCS/(hydro)cortisone
+
+med_all_subgroups[, ':='(ocs = ifelse(Medication_GWAS_Group == "Oral Corticosteroids" | 
+                                        Medication_Pegasus_Group == "Oral Steroids", 1, 0), 
+                         ics = ifelse(Medication_GWAS_Group %in% c("Inhaled Corticosteroids", 
+                                                                   "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                                        Medication_Pegasus_Group == "Inhaled Steroids", 1, 0), 
+                         cortisone_hydro = ifelse(Medication_Pegasus_Group %in% c("Cortisone", "Hydrocortisone"), 1, 0))]
+
+med_cs <- merge(med, med_all_subgroups, by = "Medication")
+med_cs[, unique(EMPI)] %in% pool[, EMPI] %>% table() # Number of subjects with corticosteroids med data
+med_cs[med_timegap_to1st_d <= 0, length(unique(EMPI))] # Number of subjects with corticosteroids med data before first plasma date
+
+```
+
+## 4.2. Number of ICS/OCS prescriptions within 1 year prior to first plasma date
+
+```{r}
+
+## Function to generate variables on ICS/OCS under certain restriction
+
+cs_vars_fnc <- function(restriction, varname_suffix) {
+        cs_tmp <- eval(parse(text = str_c("med_cs[", restriction, ", ]")))
+        cs_per_subj <- cs_tmp[, .(n_ics_rec = sum(ics, na.rm = T), 
+                                  n_ocs_rec = sum(ocs, na.rm = T)), EMPI]
+        cs_per_subj <- merge(cs_per_subj, cs_tmp[ics == 1, .(ics_closest_days_to1st = max(med_timegap_to1st_d)), EMPI], 
+                             by = "EMPI", all.x = T)
+        cs_per_subj <- merge(cs_per_subj, cs_tmp[ocs == 1, .(ocs_closest_days_to1st = max(med_timegap_to1st_d)), EMPI], 
+                             by = "EMPI", all.x = T)
+        setnames(cs_per_subj, c("EMPI", str_c(colnames(cs_per_subj)[-1], varname_suffix)))
+        return(cs_per_subj)
+}
+
+
+## Generate # of ICS/OCS prescriptions within 5/2/1 year prior to last plasma date
+
+dat <- pool[, .(EMPI, Biobank_Subject_ID, asthma_existence, asthma_ppv, first_plasma_date, last_plasma_date)]
+ocs_ics_dat <- merge(dat, 
+                     cs_vars_fnc(restriction = "med_timegap_to1st_d <= 0 & med_timegap_to1st_d >= -5", 
+                     varname_suffix = "_5ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+ocs_ics_dat <- merge(ocs_ics_dat, 
+                     cs_vars_fnc(restriction = "med_timegap_to1st_d <= 0 & med_timegap_to1st_d >= -2", 
+                     varname_suffix = "_2ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+ocs_ics_dat <- merge(ocs_ics_dat, 
+                     cs_vars_fnc(restriction = "med_timegap_to1st_d <= 0 & med_timegap_to1st_d >= -1", 
+                     varname_suffix = "_1ybf_1stplasma"), 
+                     by = "EMPI", all.x = T)
+fwrite(ocs_ics_dat, file = here(res_dir, "ocs_ics_data_before_first_plasma_date_all_subjects.csv"))
+
+```
+
+Variable names:  
+
+ - n_ics_rec: number of ICS prescription records (if NA means subject didn't have any ics/ocs data)
+ - ics_closest_days_to1st: number of days between closest ics/ocs record and first plasma date within specified time frame
+ - n_ocs_rec: number of OCS prescription records (if NA means subject didn't have any ics/ocs data) 
+ - ocs_closest_days_to1st: number of days between closest ics/ocs record and first plasma date within specified time frame
+
+Suffix (to specify time frame):
+
+ - _5ybf_1stplasma: five years before first plasma collection date
+ - _2ybf_1stplasma: two years before first plasma collection date
+ - _1ybf_1stplasma: one year before first plasma collection date 
+
+# Session info
+
+```{r}
+
+sessionInfo()
+
+```

@@ -1,0 +1,290 @@
+---
+title: "PEGASUS Lung Function"
+author: "MHuang"
+date: "10/22/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra", "Hmisc")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+
+## Functions
+
+source(here("scripts/schu/fxns.rpdr.drv.phen_1022_MHedit.R"))
+
+```
+
+# 1. Read in subject list
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+```
+
+# 2. Lung function test variables from Pul file
+
+```{r}
+
+filePathToPulTxt <- str_c(rpdr_file_header, "Pul_v2", rpdr_file_ending)
+
+pul_rpt <- getTextReport(filePathToPulTxt, 
+                         "Spiro|SPIROMETRY|Interpretation", "report_end", 
+                         "[|]")
+
+pul_id <- getPULIDs(filePathToPulTxt)
+
+
+## name the elements of pul_rpt text list
+
+names(pul_rpt) <- pul_id$EMPI
+
+
+## drop header line that we get in first report of the text file
+
+pul_rpt[[1]] <- pul_rpt[[1]][-1]
+
+
+## number of unique subjects with any pft data in pul_txt file
+
+unique(pul_id$EMPI) %>% length 
+
+
+## report type/prefix strings:
+
+# strsplit(pul_id$Report_Number, '[[:punct:]]|[:0-9:]') %>% lapply(., '[[', 1) %>% unlist %>% table
+# strsplit(pul_id$Report_Number, '[[:punct:]]|[:0-9:]') %>% lapply(., '[[', 1) %>% unlist %>% unique
+
+
+## create ReportClass variable for sanity checking/debugging later
+
+pul_id[, ReportClass := strsplit(Report_Number, '[[:punct:]]|[:0-9:]') %>% lapply(., '[[', 1) %>% unlist]
+
+
+# N.B.: some of the lung function text files don't have spirometry, or don't have pdfs to confirm accuracy of extraction
+# DFCIBICSPUL, MGHPCISPUL, FHMT = no pdfs, but do have values {File 1}
+# EPIC files from FH have no quantitative spirometry values, but do have qualitative ("normal")
+ 
+# pul_id[, .N, MRN_Type]
+# pul_id[MRN_Type == "FH", ]
+# pul_rpt[which(pul_id$MRN_Type == "FH")]
+
+
+# Each subject has UP TO two records of each PFT they had (if there are two, 
+# usually denoted as "FILE1" and "FILE2" with same prefix)
+# Note that these functions pull out values from BOTH of the FILE1 and FILE2 reports
+# Sometimes there will be more values from File 1 extractions, sometimes more from File 2 Extractions
+# Still need to write a function to get the most complete set of data. 
+# Note that postBD_Pred_XX will always be NA. Because I realized this should always just be the same as preBD_Pred_XX. 
+# Function can be cleaned up to remove that column later.
+
+
+suppressWarnings(fev1 <- dtPFTData(pul_rpt, measure='fev1', F))
+suppressWarnings(fvc <- dtPFTData(pul_rpt, measure='fvc', F))
+suppressWarnings(fvr <- dtPFTData(pul_rpt, measure='fvr', F))
+
+```
+
+# 3. Check numbers
+
+```{r}
+
+# fev1[, .N, EMPI][order(-N)] %>% datatable() # 343 unique subjects
+# fev1[!is.na(preBD_fev1), .N, EMPI][order(-N)] %>% datatable()
+all_subj[EMPI %in% unique(fev1$EMPI), .N, SampleGroup]
+
+# fvc[, .N, EMPI][order(-N)] %>% datatable() # 343 unique subjects
+# fvc[!is.na(preBD_fvc), .N, EMPI][order(-N)] %>% datatable()
+all_subj[EMPI %in% unique(fvc$EMPI), .N, SampleGroup]
+
+# fvr[, .N, EMPI][order(-N)] %>% datatable() # 343 unique subjects
+# fvr[!is.na(preBD_fvr), .N, EMPI][order(-N)] %>% datatable()
+all_subj[EMPI %in% unique(fvr$EMPI), .N, SampleGroup]
+
+ggplot(fev1[, .N, EMPI]) + 
+        geom_histogram(aes(N), bins = 100)
+
+```
+
+# 4. Extract last record before serum collection
+
+```{r}
+
+pft_prebd_fnc <- function(dat = copy(fev1), measure = "fev1", timing = c("lastbf", "closest")) {
+        
+        dat <- merge(dat, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+        dat[, timegap_d := as.numeric(Collect_Date - Date_Fmt)]
+        dat[, ':='(timegap_y = timegap_d/365.25, 
+                   timegap_d_abs = abs(timegap_d))]
+        
+        if (measure == "fev1") {
+                
+                dat[is.na(preBD_PctPred_fev1) & preBD_fev1 >= 20, preBD_PctPred_fev1 := preBD_fev1]
+                dat[preBD_PctPred_fev1 < 20 & preBD_fev1 >= 20, preBD_PctPred_fev1 := preBD_fev1]
+                
+        } else if (measure == "fvc") {
+                
+                dat[is.na(preBD_PctPred_fvc) & preBD_fvc >= 20, preBD_PctPred_fvc := preBD_fvc]
+                dat[preBD_PctPred_fvc < 20 & preBD_fvc >= 20, preBD_PctPred_fvc := preBD_fvc]
+        }
+        
+        eval(parse(text = str_c("dat_pre <- dat[!is.na(preBD_PctPred_", measure, ")]")))
+        
+        if (timing == "lastbf") {
+                
+                setkey(dat_pre, EMPI, timegap_d)
+                dat_slct <- dat_pre[timegap_d >= 0, ][, head(.SD, 1), EMPI]
+                
+        } else if (timing == "closest") {
+                
+                setkey(dat_pre, EMPI, timegap_d_abs)
+                dat_slct <- dat_pre[, head(.SD, 1), EMPI]
+        }
+        
+        eval(parse(text = str_c("dat_slct[, ':='(", measure, "_date = Date_Fmt, 
+                                                 ", measure, "_report_num = Report_Number, 
+                                                 ", measure, "_timegap_d = timegap_d, 
+                                                 ", measure, "_timegap_y = timegap_y, 
+                                                 ", measure, "_pred = preBD_Pred_", measure, ", 
+                                                 ", measure, "_prebd_pctpred = preBD_PctPred_", measure, ")]")))
+        cols_to_keep <- c("EMPI", str_c(measure, "_prebd_pctpred"), str_c(measure, "_pred"), 
+                          str_c(measure, "_date"), str_c(measure, "_report_num"), 
+                          str_c(measure, "_timegap_d"), str_c(measure, "_timegap_y"))
+        return(dat_slct[, ..cols_to_keep]) 
+}
+
+fev1_prebd_lastbf <- pft_prebd_fnc(copy(fev1), "fev1", "lastbf")
+fvc_prebd_lastbf <- pft_prebd_fnc(copy(fvc), "fvc", "lastbf")
+
+pft_prebd_lastbf <- merge(fev1_prebd_lastbf, fvc_prebd_lastbf, by = "EMPI")
+pft_prebd_lastbf <- merge(pft_prebd_lastbf, all_subj[, .(EMPI, SampleGroup)], by = "EMPI", all.x = T)
+pft_prebd_lastbf[, .N, SampleGroup]
+
+ggplot(pft_prebd_lastbf) + 
+        facet_grid(. ~ SampleGroup) + 
+        geom_histogram(aes(fev1_timegap_y), bins = 200) + 
+        labs(title = "Timing of FEV1 & FVC record last before serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 218 asthmatics / 27 controls") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+pft_prebd_lastbf[, .N, .(fev1_timegap_d <= 7, fev1_timegap_y <= 1, fev1_timegap_y <= 2)]
+
+ggplot(pft_prebd_lastbf) + 
+        facet_grid(. ~ SampleGroup) + 
+        geom_point(aes(x = fvc_prebd_pctpred, y = fev1_prebd_pctpred)) + 
+        labs(title = "FEV1 vs FVC last before serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "FVC %predicted", 
+             y = "FEV1 %predicted", 
+             caption = "n = 218 asthmatics / 27 controls") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+```
+
+# 5. Extract record closest to serum collection
+
+```{r}
+
+fev1_prebd_closest <- pft_prebd_fnc(copy(fev1), "fev1", "closest")
+fvc_prebd_closest <- pft_prebd_fnc(copy(fvc), "fvc", "closest")
+
+pft_prebd_closest <- merge(fev1_prebd_closest, fvc_prebd_closest, by = "EMPI")
+pft_prebd_closest <- merge(pft_prebd_closest, all_subj[, .(EMPI, SampleGroup)], by = "EMPI", all.x = T)
+pft_prebd_closest[, .N, SampleGroup]
+
+ggplot(pft_prebd_closest) + 
+        facet_grid(. ~ SampleGroup) + 
+        geom_histogram(aes(fev1_timegap_y), bins = 200) + 
+        labs(title = "Timing of FEV1 & FVC record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 260 asthmatics / 46 controls") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+pft_prebd_closest[, .N, .(abs(fev1_timegap_d) <= 7, abs(fev1_timegap_y) <= 1, abs(fev1_timegap_y) <= 2)]
+
+ggplot(pft_prebd_closest) + 
+        facet_grid(. ~ SampleGroup) + 
+        geom_point(aes(x = fvc_prebd_pctpred, y = fev1_prebd_pctpred)) + 
+        labs(title = "FEV1 vs FVC closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "FVC %predicted", 
+             y = "FEV1 %predicted", 
+             caption = "n = 260 asthmatics / 46 controls") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+```
+
+# 6. Save data
+
+```{r}
+
+fwrite(pft_prebd_lastbf, file = here(dat_dir, "pft_prebronchodilator_last_before_serum_collection.csv"))
+fwrite(pft_prebd_closest, file = here(dat_dir, "pft_prebronchodilator_closest_to_serum_collection.csv"))
+
+
+## Save long format data
+
+fwrite(fev1, file = here(long_fmt_dir, "fev1_long.csv"))
+fwrite(fvc, file = here(long_fmt_dir, "fvc_long.csv"))
+fwrite(fvr, file = here(long_fmt_dir, "fev1_fvc_ratio_long.csv"))
+
+```
+
+# 7. Session info
+
+```{r}
+
+sessionInfo()
+
+```

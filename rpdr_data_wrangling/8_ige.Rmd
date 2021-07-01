@@ -1,0 +1,291 @@
+---
+title: "PEGASUS Labs - IgE & Environmental Allergies"
+author: "MHuang"
+date: "1/22/2021"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+spec_ige_rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_03012021_specific_ige/mq116_030121195616980056_")
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+```
+
+# 1. Laboratory tests data
+## 1.1. Read in data & parse out different labs
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+lab <- fread(str_c(rpdr_file_header, "Lab", rpdr_file_ending), quote = "")
+lab[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+lab[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+lab[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+lab[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                    Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+
+lab <- merge(lab, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+lab[, lab_timegap_d := as.numeric(Collect_Date - Lab_Date)]
+lab[, lab_timegap_y := lab_timegap_d/365.25]
+lab[, summary(lab_timegap_y)]
+
+lab_condensed <- unique(lab[, .(Group_Id, Loinc_Code, Test_Id, Test_Description, Specimen_Type)])
+
+lab_condensed[grepl("(?i)ige", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)ige", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+ige_code <- unique(lab_condensed[grepl("(?i)ige", Group_Id), Loinc_Code])
+
+```
+
+## 1.2. Subset out labs after serum collection
+
+This will effectively exclude subjects with no serum collection date
+
+```{r}
+
+lab_trim <- lab[Lab_Date <= Collect_Date, ]
+lab_trim[, length(unique(EMPI))] 
+lab_trim[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+
+```
+
+# 2. IgE
+
+```{r}
+
+ige_long <- lab[Loinc_Code %in% ige_code, ]
+ige_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up data (test results & unit, missingness etc.)
+
+ige_long[, ':='(ige_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                ige = as.numeric(Result), 
+                ige_date = Lab_Date)]
+ige_long[is.na(ige), .N, .(Result, Reference_Units)] %>% datatable()
+ige_long[is.na(ige), Reference_Units := NA]
+
+ige_long[, .N, Reference_Units] %>% datatable()
+ige_long[Reference_Units == "mg/dl", ige := NA]
+ige_long[, summary(ige)]
+ige_long[!is.na(ige), ':='(ige_unit = "kU/L", 
+                           ige_ref_range = Reference_Range, 
+                           ige_abnormal_flg = Abnormal_Flag)]
+
+ige_long <- ige_long[!is.na(ige) & !is.na(Collect_Date), ]
+
+```
+
+## 2.1. Extract last record before serum collection
+
+```{r}
+
+ige_long[, summary(ige_timegap_d)]
+ige_long[, ':='(ige_timegap_y = ige_timegap_d/365.25, 
+                ige_timegap_d_abs = abs(ige_timegap_d))]
+ige_long[, summary(ige_timegap_y)]
+
+setkey(ige_long, EMPI, ige_timegap_d)
+ige_lastbf <- ige_long[ige_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+ige_lastbf[, .N, .(ige_timegap_d <= 7, ige_timegap_y <= 1)] %>% 
+        setnames(., c("ige_timegap<=7d_before", "ige_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(ige_lastbf) + 
+        geom_histogram(aes(ige_timegap_y), bins = 100) + 
+        labs(title = "Timing of IgE record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 169") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(ige_lastbf) +
+        geom_histogram(aes(ige), bins = 100) +
+        labs(title = "IgE last before/on serum collection",
+             x = "IgE (kU/L)",
+             caption = "n = 169") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 2.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(ige_long, EMPI, ige_timegap_d_abs)
+ige_closest <- ige_long[, head(.SD, 1), EMPI]
+ige_closest[, .N, .(ige_timegap_d_abs <= 7, abs(ige_timegap_y) <= 1)] %>% 
+        setnames(., c("ige_absolute_timegap<=7d", "ige_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(ige_closest) + 
+        geom_histogram(aes(ige_timegap_y), bins = 100) + 
+        labs(title = "Timing of IgE record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 206") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(ige_closest) +
+        geom_histogram(aes(ige), bins = 100) +
+        labs(title = "IgE closest to serum collection",
+             x = "IgE (kU/L)",
+             caption = "n = 206") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 3. Allergies (environmental)
+
+```{r}
+
+alg <- fread(str_c(rpdr_file_header, "All", rpdr_file_ending), quote = "")
+alg[, .N, Allergen_Type] # Not really useful
+alg <- alg[Status == "Active", ]
+datatable(alg[, .N, .(Allergen)], filter = "top")
+
+alg_env_long <- alg[Allergen %in% c("BIRCH", "RAGWEED", "RAGWEED POLLEN", "WEED POLLEN-SHORT RAGWEED",  
+                                    "DOG DANDER", "DOG HAIR STANDARDIZED ALLERGENIC EXTRACT", 
+                                    "CAT DANDER", "CAT HAIR STANDARDIZED ALLERGENIC EXTRACT", 
+                                    "CAT HAIR STD ALLERGENIC EXT", "ASPERGILLUS FUMIGATIS", "HOUSE DUST MITE")]
+alg_env_long[, length(unique(EMPI))]
+
+alg_env_long[, Noted_Date := as.Date(Noted_Date, format = "%m/%d/%Y")]
+alg_env_long <- merge(alg_env_long, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+alg_env_long[, summary(as.numeric(Noted_Date - Collect_Date)/365.25)]
+alg_env_long[, alg_env_existence := 1]
+alg_env_ever <- unique(alg_env_long[, .(EMPI, alg_env_existence)])
+
+```
+
+# 4. Specific IgE
+
+```{r}
+
+spec_ige_long <- fread(str_c(spec_ige_rpdr_file_header, "Clb", rpdr_file_ending), quote = "")
+spec_ige_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+spec_ige_long[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+spec_ige_long[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+spec_ige_long[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                              Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+
+spec_ige_long <- merge(spec_ige_long, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+spec_ige_long[, spec_ige_timegap_d := as.numeric(Collect_Date - Lab_Date)]
+spec_ige_long[, spec_ige_timegap_y := spec_ige_timegap_d/365.25]
+spec_ige_long[, summary(spec_ige_timegap_y)]
+
+
+## Clean up data (test results & unit, missingness etc.)
+
+spec_ige_long[, ':='(spec_ige_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                     spec_ige = as.numeric(Result), 
+                     spec_ige_date = Lab_Date)]
+spec_ige_long[is.na(spec_ige), .N, .(Result, Reference_Units)] %>% datatable()
+
+spec_ige_long[, .N, Reference_Units] %>% datatable()
+spec_ige_long[Reference_Units == "U/L", .N, .(Result, Result_Text)]
+spec_ige_long[grepl("<0.35|<0.10|>100|>=100", Result), .N, Result]
+
+spec_ige_long[, summary(spec_ige)]
+spec_ige_long[, .N, Abnormal_Flag] %>% datatable()
+
+spec_ige_long[, ':='(spec_ige_high = case_when(Abnormal_Flag %in% c("*", "H") | spec_ige >= 0.35 ~ 1, 
+                                               Result %in% c(">100", ">=100") ~ 1, 
+                                               Result %in% c("<0.35", "<0.10", "Negative") ~ 0, 
+                                               grepl("<.35", Result_Text) ~ 0), 
+                     spec_ige_text = case_when(Result %in% c(">100", ">=100", "<0.35", "<0.10", "Negative") ~ Result, 
+                                               grepl("<.35", Result_Text) ~ "<0.35", 
+                                               !is.na(spec_ige) ~ as.character(spec_ige)))]
+spec_ige_long[, .N, spec_ige_high]
+spec_ige_long <- spec_ige_long[!is.na(spec_ige_high) & !is.na(Collect_Date), ]
+spec_ige_long[, summary(spec_ige_date)]
+
+spec_ige_high_ever <- spec_ige_long[, .(spec_ige_high = max(spec_ige_high)), by = EMPI]
+spec_ige_high_ever[, .N, spec_ige_high]
+
+```
+
+# 5. Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+fwrite(ige_lastbf[, .(EMPI, ige, ige_date, ige_unit, ige_timegap_d, ige_timegap_y, ige_ref_range, ige_abnormal_flg)], 
+       file = here(dat_dir, "ige_last_before_serum_collection.csv"))
+
+fwrite(ige_closest[, .(EMPI, ige, ige_date, ige_unit, ige_timegap_d, ige_timegap_y, ige_ref_range, ige_abnormal_flg)], 
+       file = here(dat_dir, "ige_closest_to_serum_collection.csv"))
+
+ige_long[, total_ige_high := ifelse(ige > 100, 1, 0)]
+total_ige_high_ever <- ige_long[, .(total_ige_high = max(total_ige_high)), by = EMPI]
+allergy <- merge(total_ige_high_ever, alg_env_ever, by = "EMPI", all = T)
+allergy <- merge(allergy, spec_ige_high_ever, by = "EMPI", all = T)
+allergy[, allergy_ever := case_when(total_ige_high == 1 | alg_env_existence == 1 | spec_ige_high == 1 ~ 1, 
+                                    TRUE ~ 0)]
+fwrite(allergy, file = here(dat_dir, "ige_high_env_allergy_ever.csv"))
+
+
+## Save long format data
+
+fwrite(ige_long, file = here(long_fmt_dir, "ige_long.csv"))
+
+fwrite(alg_env_long, file = here(long_fmt_dir, "allergy_environmental_long.csv"))
+
+fwrite(spec_ige_long, file = here(long_fmt_dir, "spec_ige_long.csv"))
+
+```
+
+# 6. Session info
+
+```{r}
+
+sessionInfo()
+
+```

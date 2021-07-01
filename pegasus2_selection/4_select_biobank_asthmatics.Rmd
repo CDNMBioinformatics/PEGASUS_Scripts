@@ -1,0 +1,292 @@
+---
+title: "Choosing MGB Biobank asthmatic subject/samples for further omics study"
+subtitle: "Sample size by varying criteria"
+author: "MHuang"
+date: "2/18/2021"
+output:   
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+dat_dir <- "data/"
+fig_dir <- "figures/"
+res_dir <- "results/"
+
+
+## File names
+
+pool_fname <- here(res_dir, "selection_pool.csv")
+
+
+## Hard-coded numbers 
+
+sig_digits <- 3
+
+```
+
+# 1. Read in selection pool
+
+Exclude:  
+
+ - subjects with no plasma sample  
+ - non-asthmatics  
+
+```{r}
+
+pool <- fread(pool_fname); nrow(pool)
+
+```
+
+Lung function data variable names:  
+
+ - n_pul_rec: number of pulmonary function test (pft, spirometry) records  
+ - earliest_pul_rec: date of earliest pft record  
+ - latest_pul_rec: date of latest pft record  
+ - has_pul_rec: has any pft record  
+
+Medication data variable names:  
+
+ - n_ics_rec: number of ICS prescription records  
+ - ics_rec_latest_timegap_d: date of latest ICS prescription - last plasma date in days
+ - has_ics_rec: has ICS prescription records  
+ - n_ocs_rec: number of OCS prescription records  
+ - ocs_rec_latest_timegap_d: date of latest OCS prescription - last plasma date in days
+ - has_ocs_rec: has OCS prescription records  
+
+Asthma exacerbations & severity, adrenal insufficiency variable names:  
+
+ - n_exac_dia: number of asthma exacerbation diagnoses    
+ - has_exac_dia: has asthma exacerbation diagnoses    
+ - n_sevr_dia: number of asthma severity diagnoses  
+ - has_sevr_dia: has asthma severity diagnoses  
+ - n_adrinsuf_dia: number of adrenal insufficiency diagnoses  
+ - has_adrinsuf_dia: has adrenal insufficiency diagnoses  
+
+Suffix:  
+
+ - _alltime: all time in system  
+ - _bflastpl: all time prior to last plasma date  
+ - _10ybflastpl: within 10 years prior to last plasma date  
+ - _5ybflastpl: within 5 years prior to last plasma date  
+ - _4ybflastpl: within 4 years prior to last plasma date  
+ - _3ybflastpl: within 3 years prior to last plasma date  
+ - _2ybflastpl: within 2 years prior to last plasma date  
+ - _1ybflastpl: within 1 year prior to last plasma date  
+
+BMI/lab test data variable names (bmi as example, replace with acth/cortisol/eos/ige):  
+
+ - bmi: BMI value of a single record  
+ - bmi_date: date of BMI record  
+ - n_bmi_rec: number of BMI records 
+ - bmi_all_values: list of all BMI values  
+ - bmi_all_dates: list of all BMI record dates  
+ - bmi_median: median BMI among all values  
+ - bmi_min: minimum BMI among all values  
+ - bmi_max: maximum BMI among all values  
+ - bmi_mean: mean BMI averaged across all values  
+ - bmi_closest_timegap_d: date of closest BMI record - last plasma date in days
+
+Suffix:  
+
+ - _closest_lastpl: closest record to last plasma date  
+ - _pm3y_lastpl: plus or minus 3 years around last plasma date  
+ - _pm2y_lastpl: plus or minus 2 years around last plasma date  
+ - _pm1y_lastpl: plus or minus 1 year around last plasma date  
+
+Others:  
+
+ - Age  
+ - Gender  
+ - race  
+ - asthma_ppv: range 0.82 - 0.95  
+ - copd_existence: Yes/No (Biobank algorithm)  
+ - copd_ppv: range 0.75 - 0.94
+ - smk_ever_alltime: ever has a record of former/current smoking during all time in MGB system
+
+# 2. General demographics
+## 2.1. All subjects in pool
+
+```{r}
+
+pool[, summary(Age)]
+pool[, .N, .(`age>=18` = Age >= 18)]
+
+ggplot(pool, aes(x = Gender, y = Age)) + 
+        geom_jitter(alpha = 0.5) + 
+        geom_violin(alpha = 0.5)
+
+pool[, .N, race][order(-N)][, pct := N/sum(N)*100] %>% print(digits = sig_digits - 1)
+
+pool[, .N, copd_existence]
+
+pool[, .N, smk_ever_alltime]
+
+
+## Median BMI from within (+/-)1 year against BMI closest to last plasma date
+
+pool[, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl)]
+pool[, summary(bmi_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = bmi_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool, aes(x = bmi_closest_lastpl, y = bmi_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+```
+
+# 3. Pulmanory function test (pft) data availability
+## 3.1. 2+ pft records
+
+```{r}
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .N]
+pool[Age >= 18 & n_pul_rec_alltime >= 2, summary(Age)]
+
+ggplot(pool[Age >= 18 & n_pul_rec_alltime >= 2, ], aes(x = Gender, y = Age)) + 
+        geom_jitter(alpha = 0.5) + 
+        geom_violin(alpha = 0.5)
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .N, race
+     ][order(-N)][, pct := N/sum(N)*100] %>% print(digits = sig_digits - 1)
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .N, copd_existence]
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .N, smk_ever_alltime]
+
+
+## Median BMI from within (+/-)1 year against BMI closest to last plasma date
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl)]
+pool[Age >= 18 & n_pul_rec_alltime >= 2, summary(bmi_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool[Age >= 18 & n_pul_rec_alltime >= 2, ]) + 
+        geom_histogram(aes(x = bmi_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool[Age >= 18 & n_pul_rec_alltime >= 2, ], 
+       aes(x = bmi_closest_lastpl, y = bmi_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+
+## Timing of pul record
+
+pool[n_pul_rec_alltime >= 2 & Age >= 18, .N, .(has_pul_1ybf = closest_pul_rec_bf_timegap_d_alltime >= -365)] 
+pool[n_pul_rec_alltime >= 2 & Age >= 18, .N, .(has_pul_1yaf = closest_pul_rec_af_timegap_d_alltime <= 365)]
+pool[n_pul_rec_alltime >= 2 & Age >= 18, ][closest_pul_rec_bf_timegap_d_alltime >= -365*5 | 
+                                             closest_pul_rec_af_timegap_d_alltime <= 365*5, .N]
+pool[n_pul_rec_alltime >= 2 & Age >= 18, ][closest_pul_rec_bf_timegap_d_alltime >= -365 & 
+                                             closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+
+
+## Timegap between 1st and last pul records
+
+pool[n_pul_rec_alltime >= 2 & Age >= 18, 
+     timegap_y_1st_last_pul := as.numeric(as.Date(earliest_pul_rec_alltime, "%Y-%m-%d") - 
+                                            as.Date(latest_pul_rec_alltime, "%Y-%m-%d"))/365.25]
+ggplot(pool[n_pul_rec_alltime >= 2 & Age >= 18, ]) + 
+        geom_histogram(aes(timegap_y_1st_last_pul), bins = 200)
+pool[n_pul_rec_alltime >= 2 & Age >= 18, .N, .(timegap_y_1st_last_pul <= -1)]
+
+pool[Age >= 18 & n_pul_rec_alltime >= 2, .(in_pegasus1, n_pul_rec_alltime, closest_pul_rec_bf_timegap_d_alltime, 
+                                           closest_pul_rec_af_timegap_d_alltime, timegap_y_1st_last_pul, 
+                                           has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl, 
+                                           asthma_ppv, Age, copd_existence, smk_ever_alltime, 
+                                           n_ics_rec_5ybflastpl, n_ocs_rec_5ybflastpl, n_exac_dia_5ybflastpl, 
+                                           n_sevr_dia_5ybflastpl, n_ige_rec_pm1y_lastpl, n_cortisol_rec_pm1y_lastpl, 
+                                           n_acth_rec_pm1y_lastpl, n_eos_rec_pm1y_lastpl)] %>% 
+        datatable(filter = "top")
+
+```
+
+## 3.2. 1 pft record
+
+```{r}
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N]
+pool[Age >= 18 & n_pul_rec_alltime == 1, summary(Age)]
+
+ggplot(pool[Age >= 18 & n_pul_rec_alltime == 1, ], aes(x = Gender, y = Age)) + 
+        geom_jitter(alpha = 0.5) + 
+        geom_violin(alpha = 0.5)
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, race
+     ][order(-N)][, pct := N/sum(N)*100] %>% print(digits = sig_digits - 1)
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, copd_existence]
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, smk_ever_alltime]
+
+
+## Median BMI from within (+/-)1 year against BMI closest to last plasma date
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl)]
+pool[Age >= 18 & n_pul_rec_alltime == 1, summary(bmi_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool[Age >= 18 & n_pul_rec_alltime == 1, ]) + 
+        geom_histogram(aes(x = bmi_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool[Age >= 18 & n_pul_rec_alltime == 1, ], 
+       aes(x = bmi_closest_lastpl, y = bmi_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+
+## Timing of pul record
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, .(has_pul_1ybf = closest_pul_rec_bf_timegap_d_alltime >= -365)] 
+pool[Age >= 18 & n_pul_rec_alltime == 1, .N, .(has_pul_1yaf = closest_pul_rec_af_timegap_d_alltime <= 365)]
+pool[Age >= 18 & n_pul_rec_alltime == 1, ][closest_pul_rec_bf_timegap_d_alltime >= -365 | 
+                                             closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+
+pool[Age >= 18 & n_pul_rec_alltime == 1, .(in_pegasus1, n_pul_rec_alltime, closest_pul_rec_bf_timegap_d_alltime, 
+                                           closest_pul_rec_af_timegap_d_alltime, timegap_y_1st_last_pul, 
+                                           has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl, 
+                                           asthma_ppv, Age, copd_existence, smk_ever_alltime, 
+                                           n_ics_rec_5ybflastpl, n_ocs_rec_5ybflastpl, n_exac_dia_5ybflastpl, 
+                                           n_sevr_dia_5ybflastpl, n_ige_rec_pm1y_lastpl, n_cortisol_rec_pm1y_lastpl, 
+                                           n_acth_rec_pm1y_lastpl, n_eos_rec_pm1y_lastpl)] %>% 
+        datatable(filter = "top")
+
+```
+
+# 4. ICS medication
+
+```{r}
+
+pool[Age >= 18, .N, .(has_ics_rec_5ybflastpl, has_ics_rec_4ybflastpl, has_ics_rec_3ybflastpl, 
+                      has_ics_rec_2ybflastpl, has_ics_rec_1ybflastpl)
+     ][order(has_ics_rec_5ybflastpl, has_ics_rec_4ybflastpl, has_ics_rec_3ybflastpl, 
+             has_ics_rec_2ybflastpl, has_ics_rec_1ybflastpl)]
+
+pool[Age >= 18, .(has_ics_rec_5ybflastpl, has_ics_rec_4ybflastpl, has_ics_rec_3ybflastpl, has_ics_rec_2ybflastpl, 
+                  has_ics_rec_1ybflastpl, has_acth_rec_pm1y_lastpl, has_cortisol_rec_pm1y_lastpl, 
+                  has_exac_dia_5ybflastpl, n_exac_dia_5ybflastpl, has_sevr_dia_5ybflastpl, n_sevr_dia_5ybflastpl, 
+                  has_adrinsuf_dia_5ybflastpl, n_adrinsuf_dia_5ybflastpl, has_pul_rec_5ybflastpl, n_pul_rec_5ybflastpl, 
+                  asthma_ppv, Age, copd_existence, has_bmi_closest_lastpl, smk_ever_alltime)] %>% 
+        datatable(filter = "top")
+
+```
+
+# 5. Session info
+
+```{r}
+
+sessionInfo()
+
+```

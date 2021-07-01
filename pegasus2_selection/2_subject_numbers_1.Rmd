@@ -1,0 +1,478 @@
+---
+title: "Choosing MGB Biobank asthmatic subject/sample numbers for further omics study"
+subtitle: "Demographics, lung function & medication"
+author: "MHuang"
+date: "2/8/2021"
+output:   
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "readxl", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+asthma_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/Asthma/Cleaned_Generated_Files/2020-11-09/"
+asthma_rpdr_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/Asthma/RPDR_Downloads/2020-06-30/"
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/rpdr_data/"
+
+dat_dir <- "data/"
+fig_dir <- "figures/"
+res_dir <- "results/"
+
+
+## File names
+
+asthma_fname <- str_c(asthma_dir, "RPDR_cleaned_data_2020-11-09.csv")
+pegasus1_id_fname <- str_c(pegasus_dir, "PEGASUS_Subject_IDs_n1140.csv")
+rpdr_file_header <- str_c(asthma_rpdr_dir, "mns43_063020114847776198_")
+rpdr_file_ending <- ".txt"
+med_map_fname <- str_c(pegasus_dir, "Medication_Mapping.xlsx")
+plasma_dates_fname <- here(dat_dir, "Asthma_Plasma_BBIds_Analysis_Actual_Collection_Dates.xlsx")
+
+
+## Functions
+
+source(str_c(pegasus_dir, "rpdr_data_wrangling/scripts/schu/fxns.rpdr.drv.phen_1022_MHedit.R"))
+
+
+## Hard-coded numbers 
+
+sig_digits <- 3
+
+```
+
+# 1. Read in lists and exclude 
+
+Exclude:  
+
+ - existing PEGASUS subjects  
+ - subjects with no plasma sample  
+ - non-asthmatics  
+
+```{r}
+
+asthma <- fread(asthma_fname); nrow(asthma)
+pegasus1_id <- fread(pegasus1_id_fname)
+
+asthma[, ':='(in_pegasus1 = ifelse(Biobank_Subject_ID %in% pegasus1_id$SubjectID, 1, 0), 
+              plasma_existence = Plasma_Existence_Yes_No_To_6_30_2020, 
+              asthma_existence = Asthma_current_or_past_history_custom_PPV_0_80PPV_Existence_Yes_No, 
+              asthma_ppv = Asthma_current_or_past_history_custom_PPV_0_80PPV_List_of_All_Values, 
+              copd_existence = COPD_current_or_past_history_custom_PPV_0_75PPV_Existence_Yes_No, 
+              copd_ppv = COPD_current_or_past_history_custom_PPV_0_75PPV_List_of_All_Values)]
+
+asthma[, .N, .(in_pegasus1, plasma_existence, asthma_existence)][order(in_pegasus1, plasma_existence)]
+asthma[plasma_existence == "Yes" & asthma_existence == "Yes", .N, 
+       .(has_first_colldate = !is.na(Plasma_Date_First_To_6_30_2020), 
+         has_last_colldate = !is.na(Plasma_Date_Most_Recent_To_6_30_2020), 
+         missing_asthma_ppv = is.na(asthma_ppv), asthma_ppv_gt85 = asthma_ppv > 0.85, 
+         asthma_ppv_gt90 = asthma_ppv > 0.9, asthma_ppv_gt95 = asthma_ppv > 0.95)]
+
+
+## Plasma collection dates from Biobank
+
+plasma_dates <- read_xlsx(plasma_dates_fname) %>% 
+        as.data.table() %>% 
+        setnames(c("SUBJECTID", "Plasma (ml)"), c("Biobank_Subject_ID", "Plasma_ml"))
+plasma_dates[, ':='(Biobank_Subject_ID = as.integer(Biobank_Subject_ID), 
+                    COLLECT_DATE = as.Date(COLLECT_DATE, format = "%y-%m-%d"))]
+setkey(plasma_dates, Biobank_Subject_ID, COLLECT_DATE)
+
+plasma_dates_per_subj <- plasma_dates[, .(n_plasma_date = .N, 
+                                          all_plasma_date = str_c(COLLECT_DATE, collapse = ";"), 
+                                          first_plasma_date = head(COLLECT_DATE, 1), 
+                                          last_plasma_date = tail(COLLECT_DATE, 1)), 
+                                      by = Biobank_Subject_ID]
+
+asthma <- merge(asthma, plasma_dates_per_subj, by = "Biobank_Subject_ID", all.x = T)
+asthma[, .N, .(plasma_existence, has_plasma_collection_date = !is.na(n_plasma_date))]
+
+
+## Generate potential subjects selection pool 
+
+tmp_cols <- c(colnames(asthma)[1:which(colnames(asthma) == "Age_Range")], "in_pegasus1", 
+              "plasma_existence", "asthma_existence", "asthma_ppv", "copd_existence", "copd_ppv", 
+              colnames(plasma_dates_per_subj)[-1])
+pool <- asthma[asthma_existence == "Yes" & !is.na(n_plasma_date), 
+               ..tmp_cols]; nrow(pool)
+
+
+## Demographics
+
+pool[, summary(Age)]
+ggplot(pool, aes(x = Gender, y = Age)) + 
+        geom_jitter(alpha = 0.5) + 
+        geom_violin(alpha = 0.5)
+
+pool[, race := case_when(Race %in% c("BLACK OR AFRICAN AMERICAN", "Black-BLACK", 
+                                     "Hispanic Black-BLACK OR AFRICAN AMERICAN@HISPANIC") ~ "Black",
+                         Race %in% c("White-WHITE", "Hispanic White-WHITE@HISPANIC") ~ "White", 
+                         Race %in% c("Other-OTHER") ~ "Other", 
+                         Race %in% c("Not Recorded-DECLINED", "Not Recorded-UNKNOWN", "Not Recorded-U", 
+                                     "Not Recorded-@", "Not Recorded-NOT GIVEN") ~ "Unknown", 
+                         Race %in% c("Hispanic-HISPANIC OR LATINO", "Hispanic-OTHER@HISPANIC", 
+                                     "Hispanic-HISPANIC OR LATINO@HISPANIC", "Hispanic-HISPANIC", 
+                                     "Hispanic-DECLINED@HISPANIC", "Hispanic-HISPANIC@HISPANIC", 
+                                     "Hispanic-@HISPANIC") ~ "Hispanic", 
+                         Race %in% c("Asian-ASIAN") ~ "Asian", 
+                         Race %in% c("American Indian-AMERICAN INDIAN OR ALASKA NATIVE") ~ "American Indian/Alaska Native", 
+                         Race %in% c("Hawaiian-NATIVE HAWAIIAN OR OTHER PACIFIC ISLANDER") ~ "Hawaiian/Pacific Islander")]
+pool[, .N, race][, pct := N/sum(N)*100] %>% print(digits = sig_digits)
+
+
+## COPD existence
+
+pool[, summary(copd_ppv)]
+pool[, .N, .(copd_existence, copd_ppv_gt80 = copd_ppv > 0.80, copd_ppv_gt85 = copd_ppv > 0.85, 
+             copd_ppv_gt90 = copd_ppv > 0.9)][order(copd_existence, copd_ppv_gt80, copd_ppv_gt85, copd_ppv_gt90)]
+
+```
+
+# 2. Lung function data availability
+
+Variable names:  
+
+ - n_pul_rec: number of pulmonary function test (pft, spirometry) records  
+ - earliest_pul_rec: date of earliest pft record  
+ - latest_pul_rec: date of latest pft record  
+ - has_pul_rec: has any pft record  
+
+Suffix:  
+
+ - _alltime: all time in system  
+ - _bflastpl: all time prior to last plasma date  
+ - _10ybflastpl: within 10 years prior to last plasma date  
+ - _5ybflastpl: within 5 years prior to last plasma date  
+
+## 2.1. All available records
+
+```{r}
+
+filePathToPulTxt <- str_c(rpdr_file_header, "Pul_v2", rpdr_file_ending)
+pul_id <- getPULIDs(filePathToPulTxt); nrow(pul_id)
+print(str_c("Unique number of subjects with pft data in all biobank asthmatics: ", 
+            pul_id[, length(unique(EMPI))]))
+
+
+## Restrict to those with plasma
+
+pul_id <- pul_id[EMPI %in% pool$EMPI, ]; nrow(pul_id)
+print(str_c("Unique number of asthmatics with pft data & plasma sample & not in PEGASUS: ", 
+            pul_id[, length(unique(EMPI))]))
+pul_id <- merge(pul_id, pool[, .(EMPI, last_plasma_date)], by = "EMPI", all.x = T)
+
+
+## Calculate timegap between pul record & last plasma date
+
+pul_id[, pul_timegap_d := as.numeric(Date_Fmt - last_plasma_date)][, pul_timegap_y := pul_timegap_d/365.25]
+ggplot(pul_id) + 
+        geom_histogram(aes(pul_timegap_y), bins = 200) + 
+        labs(title = "Time gap in years between PFT record and last plasma date (before = -)")
+
+
+## Function to generate variables on number of pul records under certain restriction
+
+n_pul_rec_fnc <- function(restriction, varname_suffix) {
+        pul_uniq_date <- eval(parse(text = str_c("unique(pul_id[", restriction, 
+                                                 ", .(EMPI, Date_Fmt, pul_timegap_d)])")))
+        pul_per_subj <- pul_uniq_date[, .(n_pul_rec = .N, 
+                                          earliest_pul_rec = min(Date_Fmt), 
+                                          latest_pul_rec = max(Date_Fmt)), EMPI]
+        pul_per_subj <- merge(pul_per_subj, 
+                              pul_uniq_date[pul_timegap_d < 0, 
+                                            .(closest_pul_rec_bf_timegap_d = max(pul_timegap_d)), EMPI], 
+                              by = "EMPI", all.x = T)
+        pul_per_subj <- merge(pul_per_subj, 
+                              pul_uniq_date[pul_timegap_d >= 0, 
+                                            .(closest_pul_rec_af_timegap_d = min(pul_timegap_d)), EMPI], 
+                              by = "EMPI", all.x = T)
+        setnames(pul_per_subj, c("EMPI", str_c(colnames(pul_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, pul_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_pul_rec", varname_suffix, 
+                                " := ifelse(!is.na(n_pul_rec", varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on number of pul records from all time in MGB system
+
+pool <- n_pul_rec_fnc(restriction = "", varname_suffix = "_alltime")
+
+
+## Examine data availability - all time in MGB system
+
+# display_cols <- c("EMPI", "last_plasma_date", grep("_alltime", colnames(pool), value = T))
+# datatable(pool[, ..display_cols], filter = "top")
+
+pool[n_pul_rec_alltime >= 2, .N, .(has_pul_1ybf = closest_pul_rec_bf_timegap_d_alltime >= -365)] 
+pool[n_pul_rec_alltime >= 2, .N, .(has_pul_1yaf = closest_pul_rec_af_timegap_d_alltime <= 365)]
+pool[n_pul_rec_alltime >= 2, ][closest_pul_rec_bf_timegap_d_alltime >= -365 | 
+                                 closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+pool[n_pul_rec_alltime >= 2, ][closest_pul_rec_bf_timegap_d_alltime >= -365 & 
+                                 closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+
+```
+
+## 2.2. All records before last plasma date
+
+```{r}
+
+pool <- n_pul_rec_fnc(restriction = "pul_timegap_d <= 0", varname_suffix = "_bflastpl")
+
+
+## Examine data availability - before last plasma collection date
+
+# display_cols <- c("EMPI", "last_plasma_date", grep("_bflastpl", colnames(pool), value = T))
+# datatable(pool[, ..display_cols], filter = "top")
+
+```
+
+## 2.3. All records within 10 years before last plasma date
+
+```{r}
+
+pool <- n_pul_rec_fnc(restriction = "pul_timegap_d <= 0 & pul_timegap_y >= -10", 
+                      varname_suffix = "_10ybflastpl")
+
+
+## Examine data availability - within 10 years before last plasma collection date
+
+# display_cols <- c("EMPI", "last_plasma_date", grep("_10ybflastpl", colnames(pool), value = T))
+# datatable(pool[, ..display_cols], filter = "top")
+
+```
+
+## 2.4. All records within 5 years before last plasma date
+
+```{r}
+
+pool <- n_pul_rec_fnc(restriction = "pul_timegap_d <= 0 & pul_timegap_y >= -5", 
+                      varname_suffix = "_5ybflastpl")
+
+
+## Examine data availability - within 5 years before last plasma collection date
+
+# display_cols <- c("EMPI", "last_plasma_date", grep("_5ybflastpl", colnames(pool), value = T))
+# datatable(pool[, ..display_cols], filter = "top")
+
+```
+
+## 2.5. Compare data availability in different time frames
+
+```{r}
+
+pool[, .N, .(has_pul_rec_alltime, has_pul_rec_bflastpl, has_pul_rec_10ybflastpl, has_pul_rec_5ybflastpl)
+     ][order(has_pul_rec_alltime, has_pul_rec_bflastpl, has_pul_rec_10ybflastpl, has_pul_rec_5ybflastpl)]
+
+pool[n_pul_rec_alltime >= 2 & Age >= 18, .N, .(has_pul_1ybf = closest_pul_rec_bf_timegap_d_alltime >= -365)] 
+pool[n_pul_rec_alltime >= 2 & Age >= 18, .N, .(has_pul_1yaf = closest_pul_rec_af_timegap_d_alltime <= 365)]
+pool[n_pul_rec_alltime >= 2 & Age >= 18, ][closest_pul_rec_bf_timegap_d_alltime >= -365 | 
+                                             closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+pool[n_pul_rec_alltime >= 2 & Age >= 18, ][closest_pul_rec_bf_timegap_d_alltime >= -365 & 
+                                             closest_pul_rec_af_timegap_d_alltime <= 365, .N]
+
+```
+
+# 3. Medication data
+
+Variable names:  
+
+ - n_ics_rec: number of ICS prescription records  
+ - ics_rec_latest_timegap_d: date of latest ICS prescription - last plasma date in days
+ - has_ics_rec: has ICS prescription records  
+ - n_ocs_rec: number of OCS prescription records  
+ - ocs_rec_latest_timegap_d: date of latest OCS prescription - last plasma date in days
+ - has_ocs_rec: has OCS prescription records  
+
+Suffix:  
+
+ - _1ybflastpl: within 1 year prior to last plasma date  
+ - _2ybflastpl: within 2 years prior to last plasma date  
+ - _3ybflastpl: within 3 years prior to last plasma date  
+ - _4ybflastpl: within 4 years prior to last plasma date  
+ - _5ybflastpl: within 5 years prior to last plasma date  
+ - _10ybflastpl: within 10 years prior to last plasma date  
+ - _bflastpl: all time prior to last plasma date  
+ - _alltime: all time in system  
+
+```{r}
+
+med <- fread(str_c(rpdr_file_header, "Med", rpdr_file_ending))
+med[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+med <- med[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+med[, Medication_Date := as.Date(Medication_Date, format = "%m/%d/%Y")]
+med[, summary(Medication_Date)]
+
+med <- merge(med, pool[, .(EMPI, last_plasma_date)], by = "EMPI", all.x = T)
+med[, med_timegap_d := as.numeric(Medication_Date - last_plasma_date)][, med_timegap_y := med_timegap_d/365.25]
+med[, summary(med_timegap_y)]
+
+```
+
+## 3.1. Parse out corticosteroids
+
+```{r}
+
+## Mapping file for medications of interest
+
+med_map <- read_xlsx(med_map_fname) %>% as.data.table()
+med_map_cs <- med_map[Medication_GWAS_Group %in% c("Oral Corticosteroids", "Inhaled Corticosteroids", 
+                                                   "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                        Medication_Pegasus_Group %in% c("Oral Steroids", "Inhaled Steroids", "Cortisone", 
+                                                        "Hydrocortisone"), ]
+datatable(med_map_cs[, .(Medication_Name, Medication_GWAS_Group, Medication_Pegasus_Group, 
+                         ICS_or_ICS_LABA, Medication_Biobank_Folder)])
+
+med_condensed <- med %>% group_by(Medication) %>% summarise()
+med_all_subgroups <- data.frame(Medication = character(),
+                                Medication_Name = character(),
+                                Medication_Biobank_Folder = character(),
+                                Medication_GWAS_Group = character(),
+                                Medication_Pegasus_Group = character())
+for (m in 1:nrow(med_map_cs)) {
+        med_subSampleGroup <- med_condensed %>% filter(grepl(med_map_cs[m, ]$Search_Term,
+                                                             Medication,
+                                                             ignore.case = med_map_cs[m, ]$Ignore.case,
+                                                             perl = med_map_cs[m, ]$Perl)) %>%
+                mutate(Medication_Name  = med_map_cs[m, ]$Medication_Name,
+                       Medication_Biobank_Folder = med_map_cs[m, ]$Medication_Biobank_Folder,
+                       Medication_GWAS_Group = med_map_cs[m, ]$Medication_GWAS_Group,
+                       Medication_Pegasus_Group = med_map_cs[m, ]$Medication_Pegasus_Group)
+        med_all_subgroups <- rbind(med_all_subgroups, med_subSampleGroup)
+        rm(med_subSampleGroup)
+}
+med_all_subgroups <- as.data.table(med_all_subgroups)
+
+
+## Remove duplicated records
+
+med_all_subgroups[Medication %in% med_all_subgroups[duplicated(Medication), Medication], ]
+med_all_subgroups <- med_all_subgroups[!(grepl("Pulmicort flexhaler 180 mcg", Medication) &
+                                           Medication_Name == "Dexamethasone")]
+med_all_subgroups <- med_all_subgroups[!(grepl("Id-Fluticasone Or Fluticasone/Salmeterol", Medication) &
+                                           Medication_Name == "Fluticasone/salmeterol")]
+
+
+## Add indicator for ICS/OCS/(hydro)cortisone
+
+med_all_subgroups[, ':='(ocs = ifelse(Medication_GWAS_Group == "Oral Corticosteroids" | 
+                                        Medication_Pegasus_Group == "Oral Steroids", 1, 0), 
+                         ics = ifelse(Medication_GWAS_Group %in% c("Inhaled Corticosteroids", 
+                                                                   "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                                        Medication_Pegasus_Group == "Inhaled Steroids", 1, 0), 
+                         cortisone_hydro = ifelse(Medication_Pegasus_Group %in% c("Cortisone", "Hydrocortisone"), 1, 0))]
+
+med_cs <- merge(med, med_all_subgroups, by = "Medication")
+med_cs[, unique(EMPI)] %in% pool[, EMPI] %>% table() # Number of subjects with corticosteroids med data
+med_cs[med_timegap_y <= 0, length(unique(EMPI))] # Number of subjects with corticosteroids med data before last plasma date
+
+```
+
+## 3.2. Number of ICS/OCS prescriptions prior to last plasma date
+### 3.2.1. Within 1 year prior to last plasma date
+
+```{r}
+
+## Function to generate variables on ICS/OCS under certain restriction
+
+cs_vars_fnc <- function(restriction, varname_suffix) {
+        cs_tmp <- eval(parse(text = str_c("med_cs[med_timegap_y <= 0 & ", restriction, ", ]")))
+        cs_per_subj <- cs_tmp[, .(n_ics_rec = sum(ics, na.rm = T), 
+                                  n_ocs_rec = sum(ocs, na.rm = T)), EMPI]
+        cs_per_subj <- merge(cs_per_subj, cs_tmp[ics == 1, .(ics_rec_latest_timegap_d = max(med_timegap_d)), EMPI], 
+                             by = "EMPI", all.x = T)
+        cs_per_subj <- merge(cs_per_subj, cs_tmp[ocs == 1, .(ocs_rec_latest_timegap_d = max(med_timegap_d)), EMPI], 
+                             by = "EMPI", all.x = T)
+        setnames(cs_per_subj, c("EMPI", str_c(colnames(cs_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, cs_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, ':='(has_ics_rec", varname_suffix, " = ifelse(!is.na(n_ics_rec", 
+                                             varname_suffix, "), 1, 0) %>% as.factor(), 
+                                             has_ocs_rec", varname_suffix, " = ifelse(!is.na(n_ocs_rec", 
+                                             varname_suffix, "), 1, 0) %>% as.factor())]")))
+        return(pool)
+}
+
+
+## Generate # of ICS/OCS prescriptions within 1 year prior to last plasma date
+
+pool <- cs_vars_fnc(restriction = "med_timegap_y >= -1", varname_suffix = "_1ybflastpl")
+
+```
+
+### 3.2.2. Within 2 years prior to last plasma date
+
+```{r}
+
+## Generate # of ICS/OCS prescriptions within 2 years prior to last plasma date
+
+pool <- cs_vars_fnc(restriction = "med_timegap_y >= -2", varname_suffix = "_2ybflastpl")
+
+```
+
+### 3.2.3. Within 3 years prior to last plasma date
+
+```{r}
+
+## Generate # of ICS/OCS prescriptions within 3 years prior to last plasma date
+
+pool <- cs_vars_fnc(restriction = "med_timegap_y >= -3", varname_suffix = "_3ybflastpl")
+
+```
+
+### 3.2.4. Within 4 years prior to last plasma date
+
+```{r}
+
+## Generate # of ICS/OCS prescriptions within 4 years prior to last plasma date
+
+pool <- cs_vars_fnc(restriction = "med_timegap_y >= -4", varname_suffix = "_4ybflastpl")
+
+```
+
+### 3.2.5. Within 5 years prior to last plasma date
+
+```{r}
+
+## Generate # of ICS/OCS prescriptions within 5 years prior to last plasma date
+
+pool <- cs_vars_fnc(restriction = "med_timegap_y >= -5", varname_suffix = "_5ybflastpl")
+
+```
+
+# 4. Save selection pool data
+
+```{r}
+
+fwrite(pool, here(res_dir, "selection_pool.csv"))
+
+```
+
+# 5. Session info
+
+```{r}
+
+sessionInfo()
+
+```

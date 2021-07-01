@@ -1,0 +1,391 @@
+---
+title: "PEGASUS Medications"
+author: "MHuang"
+date: "7/20/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "readxl", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+med_map_fname <- str_c(pegasus_dir, "rpdr_data/Medication_Mapping.xlsx")
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+```
+
+# 1. Medication data
+## 1.1. Read in data & parse out corticosteroids
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+med <- fread(str_c(rpdr_file_header, "Med", rpdr_file_ending))
+med[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+med[, Medication_Date := as.Date(Medication_Date, format = "%m/%d/%Y")]
+
+med <- merge(med, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+med[, med_timegap_d := as.numeric(Collect_Date - Medication_Date)]
+med[, med_timegap_y := med_timegap_d/365.25]
+med[, summary(med_timegap_y)]
+
+
+## Mapping file for medications of interest
+
+med_map <- read_xlsx(med_map_fname) %>% as.data.table()
+med_map_cs <- med_map[Medication_GWAS_Group %in% c("Oral Corticosteroids", "Inhaled Corticosteroids", 
+                                                   "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                        Medication_Pegasus_Group %in% c("Oral Steroids", "Inhaled Steroids", "Cortisone", 
+                                                        "Hydrocortisone"), ]
+datatable(med_map_cs[, .(Medication_Name, Medication_GWAS_Group, Medication_Pegasus_Group, 
+                         ICS_or_ICS_LABA, Medication_Biobank_Folder)])
+
+med_condensed <- med %>% group_by(Medication) %>% summarise()
+med_all_subgroups <- data.frame(Medication = character(),
+                                Medication_Name = character(),
+                                Medication_Biobank_Folder = character(),
+                                Medication_GWAS_Group = character(),
+                                Medication_Pegasus_Group = character())
+for (m in 1:nrow(med_map_cs)) {
+        med_subSampleGroup <- med_condensed %>% filter(grepl(med_map_cs[m, ]$Search_Term,
+                                                        Medication,
+                                                        ignore.case = med_map_cs[m, ]$Ignore.case,
+                                                        perl = med_map_cs[m, ]$Perl)) %>%
+                mutate(Medication_Name  = med_map_cs[m, ]$Medication_Name,
+                       Medication_Biobank_Folder = med_map_cs[m, ]$Medication_Biobank_Folder,
+                       Medication_GWAS_Group = med_map_cs[m, ]$Medication_GWAS_Group,
+                       Medication_Pegasus_Group = med_map_cs[m, ]$Medication_Pegasus_Group)
+        med_all_subgroups <- rbind(med_all_subgroups, med_subSampleGroup)
+        rm(med_subSampleGroup)
+}
+med_all_subgroups <- as.data.table(med_all_subgroups)
+med_all_subgroups[Medication %in% med_all_subgroups[duplicated(Medication), Medication], ]
+# Pulmicort flexhaler 180 mcg (budesonide inhalation powder 180 mcg) - LMR 5919 does not seem to 
+# contain dexamethasone - remove record
+med_all_subgroups <- med_all_subgroups[!(Medication == "Pulmicort flexhaler 180 mcg (budesonide inhalation powder 180 mcg) - LMR 5919" &
+                                           Medication_Name == "Dexamethasone")]
+med_all_subgroups[, ':='(ocs = case_when(Medication_GWAS_Group == "Oral Corticosteroids" | 
+                                           Medication_Pegasus_Group == "Oral Steroids" ~ 1, 
+                                         TRUE ~ 0), 
+                         ics = case_when(Medication_GWAS_Group %in% c("Inhaled Corticosteroids", 
+                                                                      "Inhaled Corticosteroids and Long Acting Beta Agonists") | 
+                                           Medication_Pegasus_Group == "Inhaled Steroids" ~ 1, 
+                                         TRUE ~ 0), 
+                         cortisone_hydro = case_when(Medication_Pegasus_Group %in% c("Cortisone", "Hydrocortisone") ~ 1, 
+                                                     TRUE ~ 0))]
+
+med_cs <- merge(med, med_all_subgroups, by = "Medication")
+med_cs[, unique(EMPI)] %in% all_subj[, EMPI] %>% table() 
+
+```
+
+## 1.2. Filter out medications prescribed after serum sample collection
+
+This will effectively exclude subjects with no serum collection date
+
+```{r}
+
+med_cs_trim <- med_cs[Medication_Date <= Collect_Date, ]
+med_cs_trim[, length(unique(EMPI))] 
+med_cs_trim[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+
+med_cs_trim[, cs_timegap_d := as.numeric(Collect_Date - Medication_Date)]
+med_cs_trim[, cs_timegap_y := cs_timegap_d/365.25]
+med_cs_trim[, summary(cs_timegap_y)]
+ggplot(med_cs_trim) + 
+        geom_histogram(aes(cs_timegap_y), bins = 200) + 
+        labs(x = "Time (years) from corticosteroid prescritption to serum collection") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+
+ggplot(med_cs_trim[!is.na(med_timegap_y), max(med_timegap_y, na.rm = T), by = EMPI]) + 
+        geom_histogram(aes(V1), bins = 200) + 
+        labs(x = "Maximum gap between prescription and serum collection (years) for each subject", 
+             caption = "n = 568") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+med_cs_trim[, .N, .(cs_timegap_y <= 1, cs_timegap_y <= 3, cs_timegap_y <= 5, 
+                    cs_timegap_y <= 10)][order(cs_timegap_y, cs_timegap_y.1, cs_timegap_y.2, cs_timegap_y.3)]
+
+```
+
+## 1.3. Create variables for number of prescriptions (total and total over a period of years)
+
+```{r}
+
+med_cs_smry <- med_cs_trim[, .(ics_trim_totnum = sum(ics, na.rm = T), 
+                               ocs_trim_totnum = sum(ocs, na.rm = T), 
+                               cortisone_hydro_trim_totnum = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry_1y <- med_cs_trim[cs_timegap_y <= 1, .(ics_trim_totnum_1y = sum(ics, na.rm = T), 
+                                                   ocs_trim_totnum_1y = sum(ocs, na.rm = T), 
+                                                   cortisone_hydro_trim_totnum_1y = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry <- merge(med_cs_smry, med_cs_smry_1y, by = "EMPI", all = T)
+
+med_cs_smry_2y <- med_cs_trim[cs_timegap_y <= 2, .(ics_trim_totnum_2y = sum(ics, na.rm = T), 
+                                                   ocs_trim_totnum_2y = sum(ocs, na.rm = T), 
+                                                   cortisone_hydro_trim_totnum_2y = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry <- merge(med_cs_smry, med_cs_smry_2y, by = "EMPI", all = T)
+
+med_cs_smry_3y <- med_cs_trim[cs_timegap_y <= 3, .(ics_trim_totnum_3y = sum(ics, na.rm = T), 
+                                                   ocs_trim_totnum_3y = sum(ocs, na.rm = T), 
+                                                   cortisone_hydro_trim_totnum_3y = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry <- merge(med_cs_smry, med_cs_smry_3y, by = "EMPI", all = T)
+
+med_cs_smry_5y <- med_cs_trim[cs_timegap_y <= 5, .(ics_trim_totnum_5y = sum(ics, na.rm = T), 
+                                                   ocs_trim_totnum_5y = sum(ocs, na.rm = T), 
+                                                   cortisone_hydro_trim_totnum_5y = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry <- merge(med_cs_smry, med_cs_smry_5y, by = "EMPI", all = T)
+
+med_cs_smry_10y <- med_cs_trim[cs_timegap_y <= 10, .(ics_trim_totnum_10y = sum(ics, na.rm = T), 
+                                                     ocs_trim_totnum_10y = sum(ocs, na.rm = T), 
+                                                     cortisone_hydro_trim_totnum_10y = sum(cortisone_hydro)), by = EMPI]
+med_cs_smry <- merge(med_cs_smry, med_cs_smry_10y, by = "EMPI", all = T)
+
+
+## Set NA to 0
+
+cs_cnt_cols <- grep("_trim_totnum", colnames(med_cs_smry), value = T)
+cs_cnt_cols
+med_cs_smry[, (cs_cnt_cols) := lapply(.SD, function(x) {replace(x, is.na(x), 0)}), .SDcols = cs_cnt_cols]
+med_cs_smry <- merge(med_cs_smry, all_subj[, .(EMPI, SampleGroup)], by = "EMPI")
+
+```
+
+## 1.4. Add an indicator for OCS prescribed within 10 days before serum collection
+
+```{r}
+
+# datatable(med_cs_trim[ocs == 1 & cs_timegap_d <= 10, 
+#                       .(EMPI, Medication, Medication_Date, Collect_Date, ocs, cs_timegap_d)])
+med_cs_trim[ocs == 1 & cs_timegap_d <= 10, length(unique(EMPI))]
+med_cs_smry[EMPI %in% med_cs_trim[ocs == 1 & cs_timegap_d <= 10, unique(EMPI)], .N, SampleGroup]
+med_cs_smry[, ocs_ard_serum_coll := case_when(EMPI %in% med_cs_trim[ocs == 1 & cs_timegap_d <= 10, unique(EMPI)] ~ 1, 
+                                              TRUE ~ 0)]
+
+# datatable(med_cs_trim[cortisone_hydro == 1 & cs_timegap_d <= 10, 
+#                       .(EMPI, Medication, Medication_Date, Collect_Date, cortisone_hydro, cs_timegap_d)])
+med_cs_smry[EMPI %in% med_cs_trim[cortisone_hydro == 1 & cs_timegap_d <= 10, unique(EMPI)], .N, SampleGroup]
+med_cs_smry[, cortisone_ard_serum_coll := case_when(EMPI %in% med_cs_trim[cortisone_hydro == 1 & cs_timegap_d <= 10, 
+                                                                          unique(EMPI)] ~ 1, 
+                                                    TRUE ~ 0)]
+med_cs_smry[, .N, .(ocs_ard_serum_coll, cortisone_ard_serum_coll)]
+
+```
+
+# 2. Plot corticosteroid medication counts
+
+```{r}
+
+med_cs_smry[SampleGroup == "Asthmatic", summary(ics_trim_totnum)]
+med_cs_smry[SampleGroup == "Asthmatic", summary(ocs_trim_totnum)]
+med_cs_smry[SampleGroup == "Asthmatic", summary(cortisone_hydro_trim_totnum)]
+
+med_cs_smry[SampleGroup == "Control", summary(ics_trim_totnum)]
+med_cs_smry[SampleGroup == "Control", summary(ocs_trim_totnum)]
+# med_cs_smry[SampleGroup == "Control" & ocs_trim_totnum > 0, .(EMPI, ocs_trim_totnum, ocs_ard_serum_coll)]
+# med_cs_trim[EMPI %in% med_cs_smry[SampleGroup == "Control" & ocs_trim_totnum > 0, EMPI]] %>% datatable()
+med_cs_smry[SampleGroup == "Control", summary(cortisone_hydro_trim_totnum)]
+# med_cs_smry[SampleGroup == "Control" & cortisone_hydro_trim_totnum > 0, 
+#             .(EMPI, cortisone_hydro_trim_totnum, cortisone_ard_serum_coll)]
+
+
+## ICS
+
+g1 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum_1y), bins = 100) + 
+        labs(x = "1yr before") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g2 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum_2y), bins = 100) + 
+        labs(x = "2yrs before") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g3 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum_3y), bins = 100) + 
+        labs(x = "3yrs before") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g4 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum_5y), bins = 100) + 
+        labs(x = "5yrs before") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g5 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum_10y), bins = 100) + 
+        labs(x = "10yrs before") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g6 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ics_trim_totnum), bins = 100) + 
+        labs(x = "Entire time in system") + 
+        ylim(c(0, 250)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+grid.arrange(g1, g2, g3, g4, g5, g6, nrow = 2, 
+             top = textGrob("Number of ICS prescriptions before/on serum collection", 
+                            gp = gpar(fontsize = 16)))
+
+
+## OCS
+
+g7 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum_1y), bins = 100) + 
+        labs(x = "1yr before") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g8 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum_2y), bins = 100) + 
+        labs(x = "2yrs before") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g9 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum_3y), bins = 100) + 
+        labs(x = "3yrs before") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g10 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum_5y), bins = 100) + 
+        labs(x = "5yrs before") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g11 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum_10y), bins = 100) + 
+        labs(x = "10yrs before") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+g12 <- ggplot(med_cs_smry[SampleGroup == "Asthmatic", ]) + 
+        geom_histogram(aes(ocs_trim_totnum), bins = 100) + 
+        labs(x = "Entire time in system") + 
+        ylim(c(0, 350)) + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+grid.arrange(g7, g8, g9, g10, g11, g12, nrow = 2, 
+             top = textGrob("Number of OCS prescriptions before/on serum collection", 
+                            gp = gpar(fontsize = 16)))
+
+```
+
+# 3. Detailed tabulated data
+## 3.1. ICS
+
+```{r}
+
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum_1y][order(ics_trim_totnum_1y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum_2y][order(ics_trim_totnum_2y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum_3y][order(ics_trim_totnum_3y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum_5y][order(ics_trim_totnum_5y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum_10y][order(ics_trim_totnum_10y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ics_trim_totnum][order(ics_trim_totnum)] %>% datatable()
+
+```
+
+## 3.2. OCS
+
+```{r}
+
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum_1y][order(ocs_trim_totnum_1y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum_2y][order(ocs_trim_totnum_2y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum_3y][order(ocs_trim_totnum_3y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum_5y][order(ocs_trim_totnum_5y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum_10y][order(ocs_trim_totnum_10y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, ocs_trim_totnum][order(ocs_trim_totnum)] %>% datatable()
+
+```
+
+## 3.3. Cortisone/hydrocortisone
+
+```{r}
+
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum_1y][order(cortisone_hydro_trim_totnum_1y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum_2y][order(cortisone_hydro_trim_totnum_2y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum_3y][order(cortisone_hydro_trim_totnum_3y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum_5y][order(cortisone_hydro_trim_totnum_5y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum_10y][order(cortisone_hydro_trim_totnum_10y)] %>% datatable()
+med_cs_smry[SampleGroup == "Asthmatic", .N, cortisone_hydro_trim_totnum][order(cortisone_hydro_trim_totnum)] %>% datatable()
+
+```
+
+# 4. Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+fwrite(med_cs_smry, file = here(dat_dir, "med_corticosteroids_summary.csv"))
+
+
+## Save long format data
+
+fwrite(med_cs, file = here(long_fmt_dir, "med_corticosteroids_long.csv"))
+
+```
+
+# 5. Session info
+
+```{r}
+
+sessionInfo()
+
+```

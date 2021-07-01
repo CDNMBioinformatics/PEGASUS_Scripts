@@ -1,0 +1,422 @@
+---
+title: "PEGASuS Global Metabolomics Data Processing"
+subtitle: "HILIC Positive - kNN Imputation"
+author: "MHuang"
+date: "9/14/2020"
+output: 
+  html_document: 
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "readxl", "matrixStats", "e1071", "GGally", "ggrepel", "VIM")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+dat_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/global_metabolomics_082020/2020-08_PEGASuS_metabolomics data_ver1.0/"
+fig_dir <- "figures/hilic_pos/"
+post_qc_dir <- "post_qc_data/hilic_pos/"
+
+
+## Filenames
+
+dat_fname <- str_c(dat_dir, "2020-08-21_EXP00020_PEGASuS_HILIC_POS_RTCorr_MSDIAL_curated_PeakArea_QCCorred_ForHarvard.xlsx")
+dat_sheetname <- "DATA"
+feat_sheetname <- "feature"
+
+
+## Hard-coded numbers
+
+cv_thld <- 0.25
+missing_thld <- 0.30 
+qc_rm_thld <- 0.75
+
+
+## Functions
+
+pareto <- function(x) {(x-mean(x, na.rm = T))/sqrt(sd(x, na.rm = T))}
+
+```
+
+# 1. Read in metabolomics data
+
+```{r 1.read_data}
+
+dat <- read_xlsx(dat_fname, sheet = dat_sheetname) %>% as.data.table()
+
+samp_info_cols <- colnames(dat)[1:(which(colnames(dat) == "F5")-1)]
+mets_cols <- colnames(dat)[which(colnames(dat) == "F5"):ncol(dat)]
+
+mets_info <- read_xlsx(dat_fname, sheet = feat_sheetname) %>% as.data.table()
+setnames(mets_info, c("feature", "rt_min", "mz", "tentative_annotation"))
+mets_info[, length(unique(feature))] == nrow(mets_info)
+
+dat[, .N, .(SampleType, SampleGroup, Nonsmoker)]
+
+samp_dat <- copy(dat[SampleGroup %in% c("Asthmatic", "Control"), ])
+samp_dat[, length(unique(sampleID_biobank))] == nrow(samp_dat)
+
+qc_dat <- copy(dat[SampleGroup == "SQC", ])
+qc_dat[, length(unique(Idx))] == nrow(qc_dat)
+
+```
+
+# 2. QC data CV%
+
+```{r 2.qc_dat_cv}
+
+## Use all QC samples to calculate CV, they are the same pooled sample from all other samples
+
+sum(is.na(qc_dat[, ..mets_cols]))
+mean(is.na(qc_dat[, ..mets_cols]))
+
+cv <- qc_dat[, lapply(.SD, function(x) {sd(x, na.rm = T)/mean(x, na.rm = T)}), 
+             .SDcols = mets_cols] %>% as.data.frame(cv) 
+rownames(cv) <- "cv"
+cv <- t(cv) %>% as.data.frame() %>% rownames_to_column() %>% as.data.table()
+setnames(cv, "rowname", "feature")
+
+mets_info <- merge(mets_info, cv, by = "feature")
+mets_info[, .N, .(cv <= cv_thld)]
+mets_info[, summary(cv)]
+
+
+## remove features with median qc cv > 25%
+
+mets_info[cv > cv_thld, ':='(qc_rm = 1, 
+                             qc_rm_reason = "qc samples cv > 25%")]
+
+samp_dat[, (mets_info[qc_rm_reason == "qc samples cv > 25%", feature]) := NULL]
+samp_mets_cols <- colnames(samp_dat)[which(colnames(samp_dat) == "F5"):ncol(samp_dat)]
+
+```
+
+# 3. Missingness
+## 3.1. Missing in features
+
+```{r 3.1.mets_missingness}
+
+mets_na <- samp_dat[, lapply(.SD, function(x) mean(is.na(x))), .SDcols = samp_mets_cols] %>% as.data.frame()
+rownames(mets_na) <- "pct_na_met"
+mets_na <- t(mets_na) %>% as.data.frame() %>% rownames_to_column() %>% as.data.table()
+setnames(mets_na, "rowname", "feature")
+mets_na[, summary(pct_na_met)]
+
+tmp_tbl <- mets_na[, .N, .(pct_na_met < missing_thld/3, pct_na_met < missing_thld)][order(-pct_na_met, -pct_na_met.1)]
+setnames(tmp_tbl, c("missing<10%", "missing<30%", "N"))
+print(tmp_tbl)
+
+mets_info <- merge(mets_info, mets_na, by = "feature", all.x = T)
+
+```
+
+## 3.2. Missing in samples
+
+```{r 3.2.samp_missingness}
+
+samp_na <- samp_dat[, rowMeans(is.na(.SD)), .SDcols = samp_mets_cols] %>% as.data.table()
+setnames(samp_na, "pct_na_samp")
+summary(samp_na[, pct_na_samp]) 
+
+```
+
+## 3.3. Remove metabolites with >= 75% missing
+
+```{r 3.3.rm_75miss}
+
+## Remove metabolites with >= 75% missing (these will have post-imputation IQR = 0 anyway)
+# 100% missing will cause warning when imputing with half minimum
+
+mets_info[is.na(qc_rm) & pct_na_met >= qc_rm_thld, ':='(qc_rm = 1, 
+                                                        qc_rm_reason = "metabolite missing >= 75%")]
+
+samp_dat[, (mets_info[qc_rm_reason == "metabolite missing >= 75%", feature]) := NULL]
+samp_mets_cols <- colnames(samp_dat)[which(colnames(samp_dat) == "F5"):ncol(samp_dat)]
+
+```
+
+# 4. Impute with kNN
+
+```{r 4.impute}
+
+samp_dat <- kNN(samp_dat, variable = samp_mets_cols, dist_var = samp_mets_cols, imp_var = F)
+
+```
+
+# 5. Pre-processing statistics & PCA
+## 5.1. Pre-processing stats
+
+```{r 5.1.pre_stats}
+
+mets_pre_stats <- cbind(apply(samp_dat[, ..samp_mets_cols], 2, min), 
+                        apply(samp_dat[, ..samp_mets_cols], 2, max), 
+                        apply(samp_dat[, ..samp_mets_cols], 2, IQR), 
+                        apply(samp_dat[, ..samp_mets_cols], 2, skewness))
+mets_pre_stats <- as.data.frame(mets_pre_stats) %>% rownames_to_column() %>% as.data.table()
+setnames(mets_pre_stats, c("feature", "min", "max", "iqr_pre", "skewness_pre"))
+mets_pre_stats[, ':='(iqr_rank_pre = rank(iqr_pre, ties.method = "first"), 
+                      skewness_rank_pre = rank(skewness_pre, ties.method = "first"))]
+
+mets_pre_stats[min == max, ] # None
+
+mets_pre_stats[, .N, iqr_pre == 0]
+mets_pre_stats[, summary(iqr_pre)]
+
+ggplot(mets_pre_stats) + 
+        geom_point(aes(iqr_rank_pre, iqr_pre), size = 2, alpha = 0.5) + 
+        labs(title = "Pre-processing IQR (knn imputed)") +
+        labs(x = "Rank", y = "IQR") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "iqr_preprocessing_knn.png"), width = 5, height = 5)
+
+mets_pre_stats[, summary(skewness_pre)]
+mets_pre_stats[, .N, skewness_pre > 2]
+mets_pre_stats[, .N, skewness_pre < -2]
+
+ggplot(mets_pre_stats) + 
+        geom_point(aes(skewness_rank_pre, skewness_pre), size = 2, alpha = 0.5) + 
+        labs(title = "Pre-processing skewness (knn imputed)") +
+        labs(x = "Rank", y = "Skewness") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "skewness_preprocessing_knn.png"), width = 5, height = 5)
+
+
+## Add to mets_info object
+
+mets_info <- merge(mets_info, mets_pre_stats, by = "feature", all.x = T)
+
+```
+
+## 5.2. Pre-processing PCA
+
+```{r 5.2.pre_pca}
+
+pca_pre <- prcomp(samp_dat[, ..samp_mets_cols], scale. = T)
+
+pca_pre$sdev[1]^2 / sum(pca_pre$sdev^2) 
+which((cumsum(pca_pre$sdev^2) / sum(pca_pre$sdev^2)) > 0.5)[1] 
+
+pc_pre <- as.data.table(pca_pre$x)
+pc_pre <- cbind(pc_pre, samp_dat[, .(SampleGroup, sampleID_biobank)]) 
+ggplot(pc_pre, aes(x = PC1, y = PC2)) + 
+        geom_point(aes(color = SampleGroup), size = 2, alpha = 0.5) + 
+        labs(title = "Pre-processing PC2 vs PC1 (knn imputed)") + 
+        geom_label_repel(aes(label = ifelse(PC1 < -75 | PC2 > 75, sampleID_biobank, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_preprocessing_knn.png"))
+
+```
+
+# 6. Log-transformation & pareto-scaling
+
+```{r 6.log_scale}
+
+## log 10 transform all metabolites
+
+samp_dat_origscale <- copy(samp_dat)
+samp_dat[, (samp_mets_cols) := log10(.SD + 1), .SDcols = samp_mets_cols]
+
+
+## Pareto-scale the features
+## Pareto-scaling = mean-centered and divided by the square root of standard deviation 
+
+samp_dat[, min(.SD), .SDcols = samp_mets_cols]
+samp_dat[, max(.SD), .SDcols = samp_mets_cols]
+
+samp_dat[, (samp_mets_cols) := lapply(.SD, pareto), .SDcols = samp_mets_cols]
+
+```
+
+# 7. Post-processing statistics & PCA
+## 7.1. Post-processing PCA
+
+```{r 7.1.post_pca}
+
+mets_final_df <- as.data.frame(samp_dat)
+rownames(mets_final_df) <- mets_final_df$sampleID_biobank
+mets_final_df <- subset(mets_final_df, select = samp_mets_cols)
+
+pca_post <- prcomp(mets_final_df, scale. = T)
+
+pca_post$sdev[1]^2 / sum(pca_post$sdev^2) 
+which((cumsum(pca_post$sdev^2) / sum(pca_post$sdev^2)) > 0.5)[1] 
+
+pc_post <- pca_post$x %>% as.data.frame()
+
+ggplot(pc_post, aes(x = PC1, y = PC2)) + 
+        geom_point(size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing PC2 vs PC1 (knn imputed)") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_postprocessing_knn.png"))
+
+ggpairs(pc_post[, 1:10], aes(alpha = 0.1)) + 
+        labs(title = "Post-processing PC1-10 pairwise plots (knn imputed)") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC10_pairs_postprocessing_knn.png"), width = 15, height = 12)
+
+```
+
+## 7.2. Post-processing stats
+
+```{r 7.2.post_stats}
+
+mets_post_stats <- cbind(apply(samp_dat[, ..samp_mets_cols], 2, IQR), 
+                         apply(samp_dat[, ..samp_mets_cols], 2, skewness))
+mets_post_stats <- as.data.frame(mets_post_stats) %>% rownames_to_column() %>% as.data.table()
+setnames(mets_post_stats, c("feature", "iqr_post", "skewness_post"))
+mets_post_stats[, ':='(iqr_rank_post = rank(iqr_post, ties.method = "first"), 
+                       skewness_rank_post = rank(skewness_post, ties.method = "first"))]
+
+mets_post_stats[, summary(iqr_post)]
+
+ggplot(mets_post_stats) + 
+        geom_point(aes(iqr_rank_post, iqr_post), size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing IQR (knn imputed)") +
+        labs(x = "Rank", y = "IQR") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "iqr_postprocessing_knn.png"), width = 5, height = 5)
+
+mets_post_stats[, summary(skewness_post)]
+mets_post_stats[, .N, skewness_post > 2]
+mets_post_stats[, .N, skewness_post < -2]
+
+ggplot(mets_post_stats) + 
+        geom_point(aes(skewness_rank_post, skewness_post), size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing skewness (knn imputed)") +
+        labs(x = "Rank", y = "Skewness") + 
+        theme_minimal() + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "skewness_postprocessing_knn.png"), width = 5, height = 5)
+
+mets_info <- merge(mets_info, mets_post_stats, by = "feature", all.x = T)
+
+```
+
+# 8. PC plots by sample characteristics
+
+```{r 8.plot_by_char}
+
+pc_post10 <- subset(pc_post, select = str_c("PC", 1:10)) %>% rownames_to_column() %>% as.data.table()
+setnames(pc_post10, "rowname", "sampleID_biobank")
+
+samp_dat_final <- merge(samp_dat, pc_post10, by = "sampleID_biobank")
+
+ggplot(samp_dat_final, aes(x = PC1, y = PC2)) + 
+        geom_point(aes(color = SampleGroup), size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing PC2 vs PC1 by asthma status (knn imputed)") + 
+        geom_label_repel(aes(label = ifelse(PC2 > 100, sampleID_biobank, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(legend.position = "bottom") + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_by_asthma_knn.png"))
+
+ggplot(samp_dat_final, aes(x = PC1, y = PC2)) + 
+        geom_point(aes(color = Age), size = 2, alpha = 0.5) + 
+        scale_color_continuous(high = "#132B43", low = "#56B1F7") + 
+        labs(title = "Post-processing PC2 vs PC1 by age (knn imputed)") + 
+        geom_label_repel(aes(label = ifelse(PC2 > 100, sampleID_biobank, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(legend.position = "bottom") + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_by_age_knn.png"))
+
+ggplot(samp_dat_final, aes(x = PC1, y = PC2)) + 
+        geom_point(aes(color = Gender), size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing PC2 vs PC1 by gender (knn imputed)") + 
+        geom_label_repel(aes(label = ifelse(PC2 > 100, sampleID_biobank, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(legend.position = "bottom") + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_by_gender_knn.png"))
+
+ggplot(samp_dat_final, aes(x = PC1, y = PC2)) + 
+        geom_point(aes(color = Race), size = 2, alpha = 0.5) + 
+        labs(title = "Post-processing PC2 vs PC1 by race (knn imputed)") + 
+        geom_label_repel(aes(label = ifelse(PC2 > 100, sampleID_biobank, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(legend.position = "bottom") + 
+        theme(plot.title = element_text(size = 12, face = "bold"), 
+              axis.text = element_text(size = 12), 
+              axis.title = element_text(size = 12))
+ggsave(here(fig_dir, "PC1_PC2_by_race_knn.png"))
+
+```
+
+# 9. Save processed data
+
+```{r 9.save}
+
+mets_info[, .N, .(qc_rm, qc_rm_reason)]
+
+save(samp_dat_final, samp_mets_cols, mets_info, samp_na, samp_dat_origscale, 
+     file = here(post_qc_dir, "processed_hilic_pos_knn.RData"))
+
+```
+
+# 10. Session info
+
+```{r 10.sessinfo}
+
+sessionInfo()
+
+```

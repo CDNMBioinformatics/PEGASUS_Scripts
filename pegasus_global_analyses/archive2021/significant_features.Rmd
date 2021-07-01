@@ -1,0 +1,530 @@
+---
+title: "Significant features in PEGASUS global metabolomics"
+author: "MHuang"
+date: "12/4/2020"
+output: 
+  html_document: 
+    toc: yes
+    # toc_float: 
+    #   collapsed: false
+    #   smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "readxl", "gtools", "DT", "corrplot", "pheatmap", "RColorBrewer", 
+         "viridis", "rstatix", "ggvenn")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+dat_dir <- "data/"
+fig_dir <- "figures/"
+res_dir <- "results/"
+res_dir_hilic_pos <- "results/hilic_pos/"
+res_dir_lipid_pos <- "results/lipid_pos/"
+res_dir_lipid_neg <- "results/lipid_neg/"
+res_dir_sph <- "results/sphingolipids/"
+annot_dir <- "data/annotations/"
+
+
+## File names
+
+hilic_pos_dat_fname <- here(dat_dir, "hilic_pos_data_updated.RData")
+lipid_pos_dat_fname <- here(dat_dir, "lipid_pos_data_updated.RData")
+lipid_neg_dat_fname <- here(dat_dir, "lipid_neg_data_updated.RData")
+res_name_list <- c("_overall_", "_female_", "_male_", "_ics_1y_y_", "_ics_1y_n_", "_eos_high_", "_eos_low_", 
+                   "_bmi_high_", "_bmi_low_", "_allergy_y_", "_allergy_n_", "_neut_high_", "_neut_low_")
+
+res_asth_hilic_pos_fname <- here(res_dir_hilic_pos, "res_compare_dif_asthmatics_hilic_pos.rds")
+res_asth_lipid_pos_fname <- here(res_dir_lipid_pos, "res_compare_dif_asthmatics_lipid_pos.rds")
+res_asth_lipid_neg_fname <- here(res_dir_lipid_neg, "res_compare_dif_asthmatics_lipid_neg.rds")
+res_asth_sph_fname <- here(res_dir_sph, "res_compare_dif_asthmatics_sph.rds")
+
+res_qt_hilic_pos_fname <- here(res_dir_hilic_pos, "res_qt_asthmatics_hilic_pos.rds")
+res_qt_lipid_pos_fname <- here(res_dir_lipid_pos, "res_qt_asthmatics_lipid_pos.rds")
+res_qt_lipid_neg_fname <- here(res_dir_lipid_neg, "res_qt_asthmatics_lipid_neg.rds")
+res_qt_sph_fname <- here(res_dir_sph, "res_qt_asthmatics_sph.rds")
+
+annot_fname <- here(annot_dir, "PEGASuS_Annotations_PeiZhang.xlsx")
+
+
+## Hard-coded numbers
+
+missing_thld <- 0.30
+sig_digits <- 3
+alpha_thld <- 0.05
+z_95 <- qnorm(p = 0.975)
+keep_cols <- c("subgroup", "feature", "tentative_annotation", "med_feat", "wo_ms2", "platform", "totaln", "casen", 
+               "beta", "pval", "or", "lower95", "upper95", "pct_na_met", "cv", "expo_linreg", "beta_linreg", "pval_linreg")
+num_cols <- c("beta", "pval", "fdr_bh", "or", "lower95", "upper95", "beta_linreg", "pval_linreg", "neg_log10pval")
+
+
+## Function
+
+save_pheatmap_png <- function(x, filename, width = 18, height = 18, units = "in", res = 300) {
+        png(filename, width = width, height = height, units = units, res = res)
+        grid::grid.newpage()
+        grid::grid.draw(x$gtable)
+        dev.off()
+}
+
+```
+
+# 1. Asthma vs controls results 
+## 1.1. HILIC positive results
+
+```{r}
+
+res_hilic_pos <- NULL
+for (n in res_name_list) {
+        eval(parse(text = str_c("res", n, "hilic_pos <- readRDS(file = here(res_dir_hilic_pos, 'res", 
+                                n, "hilic_pos.rds'))")))
+        eval(parse(text = str_c("res_hilic_pos <- rbind(res_hilic_pos, res", n, "hilic_pos", 
+                                "[, ..keep_cols])")))
+        eval(parse(text = str_c("rm(res", n, "hilic_pos)")))
+}
+
+nrow(res_hilic_pos[subgroup == "overall" & tentative_annotation != "Unknown" & pval < alpha_thld, ])
+nrow(res_hilic_pos[subgroup == "overall" & tentative_annotation == "Unknown" & pval < alpha_thld, ])
+
+annot_hilic_pos <- read_xlsx(annot_fname, sheet = "HILIC_POS") %>% as.data.table()
+setnames(annot_hilic_pos, gsub(" ", "_", tolower(colnames(annot_hilic_pos))))
+res_hilic_pos <- merge(res_hilic_pos, annot_hilic_pos[, .(feature, annotation, confidence_level, comment)], 
+                       by = "feature", all.x = T)
+
+res_asth_hilic_pos <- readRDS(res_asth_hilic_pos_fname)
+res_asth_hilic_pos <- merge(res_asth_hilic_pos, annot_hilic_pos[, .(feature, annotation, confidence_level, comment)], 
+                            by = "feature", all.x = T)
+
+res_qt_hilic_pos <- readRDS(res_qt_hilic_pos_fname)
+res_qt_hilic_pos <- merge(res_qt_hilic_pos, annot_hilic_pos[, .(feature, annotation, confidence_level, comment)], 
+                          by = "feature", all.x = T)
+
+```
+
+## 1.2. Lipidomics positive results
+
+```{r}
+
+res_lipid_pos <- NULL
+for (n in res_name_list) {
+        eval(parse(text = str_c("res", n, "lipid_pos <- readRDS(file = here(res_dir_lipid_pos, 'res", 
+                                n, "lipid_pos.rds'))")))
+        eval(parse(text = str_c("res_lipid_pos <- rbind(res_lipid_pos, res", n, "lipid_pos", 
+                                "[, ..keep_cols])")))
+        eval(parse(text = str_c("rm(res", n, "lipid_pos)")))
+}
+
+nrow(res_lipid_pos[subgroup == "overall" & tentative_annotation != "Unknown" & pval < alpha_thld, ])
+nrow(res_lipid_pos[subgroup == "overall" & tentative_annotation == "Unknown" & pval < alpha_thld, ])
+
+annot_lipid_pos <- read_xlsx(annot_fname, sheet = "LIPIDOMICS_POS") %>% as.data.table()
+setnames(annot_lipid_pos, gsub(" ", "_", tolower(colnames(annot_lipid_pos))))
+res_lipid_pos <- merge(res_lipid_pos, annot_lipid_pos[, .(feature, annotation, confidence_level, comment)], 
+                       by = "feature", all.x = T)
+
+res_asth_lipid_pos <- readRDS(res_asth_lipid_pos_fname)
+res_asth_lipid_pos <- merge(res_asth_lipid_pos, annot_lipid_pos[, .(feature, annotation, confidence_level, comment)], 
+                            by = "feature", all.x = T)
+
+res_qt_lipid_pos <- readRDS(res_qt_lipid_pos_fname)
+res_qt_lipid_pos <- merge(res_qt_lipid_pos, annot_lipid_pos[, .(feature, annotation, confidence_level, comment)], 
+                          by = "feature", all.x = T)
+
+```
+
+## 1.3. Lipidomics negative results
+
+```{r}
+
+res_lipid_neg <- NULL
+for (n in res_name_list) {
+        eval(parse(text = str_c("res", n, "lipid_neg <- readRDS(file = here(res_dir_lipid_neg, 'res", 
+                                n, "lipid_neg.rds'))")))
+        eval(parse(text = str_c("res_lipid_neg <- rbind(res_lipid_neg, res", n, "lipid_neg", 
+                                "[, ..keep_cols])")))
+        eval(parse(text = str_c("rm(res", n, "lipid_neg)")))
+}
+
+nrow(res_lipid_neg[subgroup == "overall" & tentative_annotation != "Unknown" & pval < alpha_thld, ])
+nrow(res_lipid_neg[subgroup == "overall" & tentative_annotation == "Unknown" & pval < alpha_thld, ])
+
+annot_lipid_neg <- read_xlsx(annot_fname, sheet = "LIPIDOMICS_NEG") %>% as.data.table()
+setnames(annot_lipid_neg, "note", "confidence_level")
+res_lipid_neg <- merge(res_lipid_neg, annot_lipid_neg[, .(feature, annotation, confidence_level)], 
+                       by = "feature", all.x = T)
+res_lipid_neg[, comment := NA]
+
+res_asth_lipid_neg <- readRDS(res_asth_lipid_neg_fname)
+res_asth_lipid_neg <- merge(res_asth_lipid_neg, annot_lipid_neg[, .(feature, annotation, confidence_level)], 
+                            by = "feature", all.x = T)
+res_asth_lipid_neg[, comment := NA]
+
+res_qt_lipid_neg <- readRDS(res_qt_lipid_neg_fname)
+res_qt_lipid_neg <- merge(res_qt_lipid_neg, annot_lipid_neg[, .(feature, annotation, confidence_level)], 
+                          by = "feature", all.x = T)
+res_qt_lipid_neg[, comment := NA]
+
+```
+
+## 1.4. Targeted sphingolipids results
+
+```{r}
+
+res_sph <- NULL
+for (n in res_name_list) {
+        eval(parse(text = str_c("res", n, "sph <- readRDS(file = here(res_dir_sph, 'res", 
+                                n, "sph.rds'))")))
+        eval(parse(text = str_c("res_sph <- rbind(res_sph, res", n, "sph", 
+                                "[, ..keep_cols])")))
+        eval(parse(text = str_c("rm(res", n, "sph)")))
+}
+
+nrow(res_sph[subgroup == "overall" & tentative_annotation != "Unknown" & pval < alpha_thld, ])
+nrow(res_sph[subgroup == "overall" & tentative_annotation == "Unknown" & pval < alpha_thld, ])
+
+res_sph[, ':='(annotation = NA, confidence_level = NA, comment = NA)]
+
+res_asth_sph <- readRDS(res_asth_sph_fname)
+res_asth_sph[, ':='(annotation = NA, confidence_level = NA, comment = NA)]
+
+res_qt_sph <- readRDS(res_qt_sph_fname)
+res_qt_sph[, ':='(annotation = NA, confidence_level = NA, comment = NA)]
+
+```
+
+## 1.5. Concatenate all results
+
+```{r}
+
+res_all <- rbind(res_hilic_pos, res_lipid_pos, res_lipid_neg, res_sph)
+res_all[grepl("Montelukast|Mequitazine|Acetaminophen|Omeprazole|Tolmetin", annotation, ignore.case = T), 
+        med_feat := 1][is.na(med_feat), med_feat := 0]
+res_all[, fdr_bh := p.adjust(pval, method = "BH"), by = subgroup]
+res_all[, ':='(feat_id = ifelse(is.na(annotation), str_c(feature, "_", tentative_annotation), 
+                            str_c(feature, "_", annotation)), 
+               med_feat = as.factor(med_feat), 
+               subgroup = factor(subgroup, levels = c("overall", "female", "male", "ics_1y_prior_yes", 
+                                                      "ics_1y_prior_no", "eos_high_300", "eos_low_300", 
+                                                      "bmi_high_30", "bmi_low_30", "ige_high_env_allergy", 
+                                                      "ige_norm_no_env_allergy", "neut_high_median", "neut_low_median")), 
+               platform = as.factor(platform), 
+               neg_log10pval = -log10(pval))]
+setcolorder(res_all, c("platform", "feature", "annotation", "confidence_level", "comment", "subgroup", 
+                       "totaln", "beta", "pval", "fdr_bh"))
+saveRDS(res_all, file = here(res_dir, "res_all.rds"))
+
+unique(res_all[platform == "HILIC-pos", .(subgroup, totaln, casen)])
+
+
+## Features with p<0.05 in overall analyses
+
+res_all[subgroup == "overall" & pval < alpha_thld, .N, .(platform)]
+
+# res_all[subgroup == "overall" & pval < alpha_thld & !is.na(annotation), ][order(pval)] %>%
+#         datatable(filter = "top") %>% formatSignif(columns = num_cols, digits = 3)
+feat_overall_005 <- res_all[subgroup == "overall" & pval < alpha_thld & !is.na(annotation), feat_id]
+length(unique(feat_overall_005)) == length(feat_overall_005); length(feat_overall_005)
+
+feat_005 <- res_all[pval < alpha_thld & !is.na(annotation), unique(feat_id)]
+length(unique(feat_005)) == length(feat_005); length(feat_005)
+table(feat_005 %in% feat_overall_005) # same as those from overall analysis
+
+
+## Features with p<0.01 in overall analyses
+
+feat_overall_001 <- res_all[subgroup == "overall" & pval < alpha_thld/5 & !is.na(annotation), feat_id]
+length(unique(feat_overall_001)) == length(feat_overall_001); length(feat_overall_001)
+
+# fwrite(res_all[feat_id %in% feat_overall_005 & subgroup == "overall", ], 
+#        file = here(res_dir, "features_significant_in_overall_nominal.csv"))
+
+```
+
+## 1.6. Features with p<0.05 in overall analysis 
+
+> include features fdr<0.05 in subgroup analyses  
+
+Subgroup analyses:  
+ - by sex F/M  
+ - by number of ICS prescriptions within 1 year prior to serum collection > 0 or not  
+ - by eosinophil count closest to serum collection >= 300/uL or not  
+ - by number of asthma exacerbations within 1 year prior to serum collection > 0 or not  
+ - by BMI >= 30 or not  
+ - by total/total IgE high or existence of environmental allergy 
+ - by neutrophil count higher than median or not  
+
+### 1.6.1. Results tables
+
+```{r}
+
+datatable(res_all[feat_id %in% feat_overall_005][order(subgroup, pval)], filter = "top") %>% 
+        formatSignif(columns = num_cols, digits = 3)
+# fwrite(res_all[feat_id %in% feat_overall_005][order(-subgroup, pval)], 
+#        file = here(res_dir, "res_sig_sort_by_subgrp_pval.csv"))
+
+# datatable(res_all[feat_id %in% feat_overall_005][order(tentative_annotation, subgroup)], 
+#           filter = "top") %>% formatSignif(columns = num_cols, digits = 3)
+# fwrite(res_all[feat_id %in% feat_overall_005][order(tentative_annotation, subgroup)], 
+#        file = here(res_dir, "res_sig_sort_by_annot_subgrp.csv"))
+
+# fwrite(res_all[feat_id %in% feat_overall_005 & pval < alpha_thld][order(tentative_annotation, pval)],
+#        file = here(res_dir, "res_sig_sort_by_annot_pval_005.csv"))
+
+```
+
+### 1.6.2. Heatmaps (non-medication features)
+
+Features with p<0.01 in overall analysis & features fdr<0.05 in subgroup analyses
+
+```{r}
+
+## -log10(pval)
+
+pval_mat_001 <- dcast(res_all[feat_id %in% feat_overall_001 & med_feat == 0, ], feat_id ~ subgroup, 
+                      value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_001) <- pval_mat_001$feat_id
+pval_mat_001$feat_id <- NULL
+pheatmap(pval_mat_001, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(10, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_001.png"), width = 21, height = 21)
+pheatmap(subset(pval_mat_001, select = c("overall", "eos_high_300", "bmi_high_30", "ige_high_env_allergy")), 
+         cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(10, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_001_subtype.png"), width = 12, height = 21)
+
+
+pval_mat_005 <- dcast(res_all[feat_id %in% feat_overall_005 & med_feat == 0, ], feat_id ~ subgroup, 
+                      value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_005) <- pval_mat_005$feat_id
+pval_mat_005$feat_id <- NULL
+pheatmap(pval_mat_005, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(10, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_005.png"), width = 21, height = 42)
+pheatmap(subset(pval_mat_005, select = c("overall", "eos_high_300", "bmi_high_30", "ige_high_env_allergy")), 
+         cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(10, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_005_subtype.png"), width = 12, height = 42)
+
+
+# ## beta
+# 
+# beta_mat <- dcast(res_all[feat_id %in% c(feat_overall_001, feat_subgrp_fdr_005) & med_feat == 0, ], feat_id ~ subgroup, 
+#                   value.var = "beta") 
+# rownames(beta_mat) <- beta_mat$feat_id
+# beta_mat$feat_id <- NULL
+# pheatmap(beta_mat, cluster_rows = T, cluster_cols = F, 
+#          main = "beta estimate") %>% 
+#         save_pheatmap_png(., here(fig_dir, "heatmap_beta.png"))
+
+
+## Venn Diagram
+
+list(`overall` = res_all[subgroup == "overall" & pval < alpha_thld, feat_id], 
+     `eos_high_300` = res_all[subgroup == "eos_high_300" & pval < alpha_thld, feat_id], 
+     `bmi_high_30` = res_all[subgroup == "bmi_high_30" & pval < alpha_thld, feat_id], 
+     `ige_high_env_allergy` = res_all[subgroup == "ige_high_env_allergy" & pval < alpha_thld, feat_id]) %>%
+        ggvenn(stroke_size = 0.5, set_name_size = 5, text_size = 5, show_percentage = F) +  
+               labs(title = "Number of features associated with asthma status (p<0.05)") + 
+               theme(plot.title = element_text(hjust = 0.5, size = 15))
+ggsave(file = here(fig_dir, "venn_overall_subtype_pval005.png"), width = 8, height = 8)
+
+
+list(`overall` = res_all[subgroup == "overall" & fdr_bh < alpha_thld, feat_id], 
+     `eos_high_300` = res_all[subgroup == "eos_high_300" & fdr_bh < alpha_thld, feat_id], 
+     `bmi_high_30` = res_all[subgroup == "bmi_high_30" & fdr_bh < alpha_thld, feat_id], 
+     `ige_high_env_allergy` = res_all[subgroup == "ige_high_env_allergy" & fdr_bh < alpha_thld, feat_id]) %>%
+        ggvenn(stroke_size = 0.5, set_name_size = 5, text_size = 5, show_percentage = F) +  
+               labs(title = "Number of features associated with asthma status (fdr<0.05)") + 
+               theme(plot.title = element_text(hjust = 0.5, size = 15))
+# ggsave(file = here(fig_dir, "venn_overall_subtype_fdr005.png"), width = 8, height = 8)
+
+```
+
+> Lipidomics nomenclature
+
+ | Abbreviation | Lipid subclass | Main class | 
+ | ------------ | -------------- | ---------- | 
+ | Cer | Ceramide | Ceramides | 
+ | CerP | Ceramide 1-phosphates | Ceramides | 
+ | FAHFA | Fatty acid ester of hydroxyl fatty acid | Fatty esters | 
+ | HexCer | Hexosylceramide | Neutral glycosphingolipids | 
+ | Hex2Cer | Dihexosylceramide | Neutral glycosphingolipids | 
+ | Hex3Cer | Trihexosylceramide | Neutral glycosphingolipids | 
+ | LPC | Lysophophatidylcholine | Glycerophosphocholines | 
+ | LPE | Lysophosphatidylethanolamine | Glycerophosphoethanolamines | 
+ | LPI | Lysophosphatidylinositol | Glycerophosphoinositols | 
+ | NAE | N-acyl ethanolamines | Fatty amides | 
+ | TG | Triacylglycerol | Triradylglycerols | 
+ | PA | Phosphatidic acid | Glycerophosphates | 
+ | PC | Phosphatidylcholine | Glycerophosphocholines | 
+ | PE | Phosphatidylethanolamine | Glycerophosphoethanolamines | 
+ | PMeOH | Phosphatidylmethanol | Other Glycerophospholipids | 
+
+### 1.6.3. Concatenate gender specific results for Priya
+#### 1.6.3.1. Female
+
+```{r, eval = F}
+
+res_all_female_sig <- res_all[subgroup == "female" & pval < alpha_thld, ..keep_cols]
+fwrite(res_all_female_sig[order(pval)], file = here(res_dir, "res_all_female_sig.csv"))
+
+```
+
+#### 1.6.3.2. Male
+
+```{r, eval = F}
+
+res_all_male_sig <- res_all[subgroup == "male" & pval < alpha_thld, ..keep_cols]
+fwrite(res_all_male_sig[order(pval)], file = here(res_dir, "res_all_male_sig.csv"))
+
+```
+
+# 2. Within asthmatics comparison results
+## 2.1. Binary comparisons
+
+```{r}
+
+res_asth <- rbind(res_asth_hilic_pos, res_asth_lipid_pos, res_asth_lipid_neg, res_asth_sph)
+res_asth[grepl("Montelukast|Mequitazine|Acetaminophen|Omeprazole|Tolmetin", annotation, ignore.case = T), 
+         med_feat := 1][is.na(med_feat), med_feat := 0]
+res_asth[, fdr_bh := p.adjust(pval, method = "BH"), by = comparison]
+res_asth[, ':='(feat_id = ifelse(is.na(annotation), str_c(feature, "_", tentative_annotation), 
+                            str_c(feature, "_", annotation)), 
+                med_feat = as.factor(med_feat), 
+                comparison = factor(comparison, 
+                                    levels = c("high_vs_low_eos_asthmatics", "obese_vs_not_asthmatics", 
+                                               "allergy_vs_not_asthmatics", "female_vs_male_asthmatics", 
+                                               "female_vs_male_controls")), 
+                platform = as.factor(platform), 
+                neg_log10pval = -log10(pval))]
+setcolorder(res_asth, c("platform", "feature", "annotation", "confidence_level", "comment", "comparison", 
+                        "beta", "pval", "fdr_bh"))
+saveRDS(res_asth, file = here(res_dir, "res_asth.rds"))
+
+datatable(res_asth[pval < alpha_thld & !(is.na(annotation) & tentative_annotation == "Unknown"), c(1:16)
+                   ][order(comparison, pval)], filter = "top") %>% 
+        formatSignif(columns = c("beta", "pval", "fdr_bh", "cv", "pct_na_met"), digits = 3)
+
+
+## -log10(pval)
+
+pval_mat_asth_001 <- dcast(res_asth[feat_id %in% feat_overall_001 & med_feat == 0, ], feat_id ~ comparison, 
+                           value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_asth_001) <- pval_mat_asth_001$feat_id
+pval_mat_asth_001$feat_id <- NULL
+pheatmap(pval_mat_asth_001, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(10, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_001_compare_asthma_subtypes.png"), width = 12, height = 21)
+
+
+pval_mat_asth_005 <- dcast(res_asth[feat_id %in% feat_overall_005 & med_feat == 0, ], feat_id ~ comparison, 
+                           value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_asth_005) <- pval_mat_asth_005$feat_id
+pval_mat_asth_005$feat_id <- NULL
+pheatmap(pval_mat_asth_005, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(20, direction = -1)) %>% 
+        save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_005_compare_asthma_subtypes.png"), width = 12, height = 42)
+
+
+## Venn Diagram
+
+list(`high_vs_low_eos` = res_asth[comparison == "high_vs_low_eos_asthmatics" & pval < alpha_thld, feat_id], 
+     `obese_vs_not` = res_asth[comparison == "obese_vs_not_asthmatics" & pval < alpha_thld, feat_id], 
+     `allergy_vs_not` = res_asth[comparison == "allergy_vs_not_asthmatics" & pval < alpha_thld, feat_id], 
+     `female_vs_male` = res_asth[comparison == "female_vs_male_asthmatics" & pval < alpha_thld, feat_id]) %>%
+        ggvenn(stroke_size = 0.5, set_name_size = 5, text_size = 5, show_percentage = F) +  
+               labs(title = "Number of features associated with binary outcomes in asthmatics (p<0.05)") + 
+               theme(plot.title = element_text(hjust = 0.5, size = 15))
+ggsave(file = here(fig_dir, "venn_bin_outc_asthmatics_pval005.png"), width = 8, height = 8)
+
+```
+
+## 2.2. Quantitative traits
+
+```{r}
+
+res_qt <- rbind(res_qt_hilic_pos, res_qt_lipid_pos, res_qt_lipid_neg, res_qt_sph)
+res_qt[grepl("Montelukast|Mequitazine|Acetaminophen|Omeprazole|Tolmetin", annotation, ignore.case = T), 
+       med_feat := 1][is.na(med_feat), med_feat := 0]
+res_qt[, fdr_bh := p.adjust(pval, method = "BH"), by = comparison]
+res_qt[, ':='(feat_id = ifelse(is.na(annotation), str_c(feature, "_", tentative_annotation), 
+                               str_c(feature, "_", annotation)), 
+              med_feat = as.factor(med_feat), 
+              comparison = factor(comparison, 
+                                  levels = c("eos_continous", "neut_continous", "fev1_continous", "fvc_continous")), 
+              platform = as.factor(platform), 
+              neg_log10pval = -log10(pval))]
+setcolorder(res_qt, c("platform", "feature", "annotation", "confidence_level", "comment", "comparison", 
+                      "beta", "pval", "fdr_bh"))
+saveRDS(res_qt, file = here(res_dir, "res_qt.rds"))
+
+datatable(res_qt[pval < alpha_thld & !(is.na(annotation) & tentative_annotation == "Unknown"), c(1:17)
+                 ][order(comparison, pval)], filter = "top") %>% 
+        formatSignif(columns = c("beta", "pval", "fdr_bh", "cv", "pct_na_met"), digits = 3)
+
+
+## -log10(pval)
+
+pval_mat_qt_001 <- dcast(res_qt[feat_id %in% feat_overall_001 & med_feat == 0, ], feat_id ~ comparison, 
+                                value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_qt_001) <- pval_mat_qt_001$feat_id
+pval_mat_qt_001$feat_id <- NULL
+pheatmap(pval_mat_qt_001, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(6, begin = 1, end = 0.5, direction = 1)) %>% 
+  save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_001_qt.png"), width = 9, height = 21)
+
+
+pval_mat_qt_005 <- dcast(res_qt[feat_id %in% feat_overall_005 & med_feat == 0, ], feat_id ~ comparison, 
+                                value.var = "neg_log10pval") %>% as.data.frame()
+rownames(pval_mat_qt_005) <- pval_mat_qt_005$feat_id
+pval_mat_qt_005$feat_id <- NULL
+pheatmap(pval_mat_qt_005, cluster_rows = T, cluster_cols = F, angle_col = 315, fontsize = 16, 
+         main = "-log10(p-value)", color = inferno(12, begin = 1, end = 0.3, direction = 1)) %>% 
+  save_pheatmap_png(., here(fig_dir, "heatmap_neg_log10pval_005_qt.png"), width = 9, height = 42)
+
+
+## Venn Diagram
+
+list(`eos_continous` = res_qt[comparison == "eos_continous" & pval < alpha_thld, feat_id], 
+     `neut_continous` = res_qt[comparison == "neut_continous" & pval < alpha_thld, feat_id], 
+     `fev1_continous` = res_qt[comparison == "fev1_continous" & pval < alpha_thld, feat_id], 
+     `fvc_continous` = res_qt[comparison == "fvc_continous" & pval < alpha_thld, feat_id]) %>%
+        ggvenn(stroke_size = 0.5, set_name_size = 5, text_size = 5, show_percentage = F) +  
+               labs(title = "Number of features associated with quantitative outcomes in asthmatics (p<0.05)") + 
+               theme(plot.title = element_text(hjust = 0.5, size = 15))
+ggsave(file = here(fig_dir, "venn_qt_outc_asthmatics_pval005.png"), width = 8, height = 8)
+
+list(`eos_continous` = res_qt[comparison == "eos_continous" & fdr_bh < alpha_thld*4, feat_id], 
+     `neut_continous` = res_qt[comparison == "neut_continous" & fdr_bh < alpha_thld*4, feat_id], 
+     `fev1_continous` = res_qt[comparison == "fev1_continous" & fdr_bh < alpha_thld*4, feat_id], 
+     `fvc_continous` = res_qt[comparison == "fvc_continous" & fdr_bh < alpha_thld*4, feat_id]) %>%
+        ggvenn(stroke_size = 0.5, set_name_size = 5, text_size = 5, show_percentage = F) +  
+               labs(title = "Number of features associated with quantitative outcomes in asthmatics (fdr<0.2)") + 
+               theme(plot.title = element_text(hjust = 0.5, size = 15))
+# ggsave(file = here(fig_dir, "venn_qt_outc_asthmatics_fdr02.png"), width = 8, height = 8)
+
+```
+
+# Session info
+
+```{r}
+
+sessionInfo()
+
+```

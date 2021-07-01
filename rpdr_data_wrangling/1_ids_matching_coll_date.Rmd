@@ -1,0 +1,218 @@
+---
+title: "PEGASUS IDs, Matching, Serum Collection Dates"
+author: "Mengna Huang"
+date: "7/20/2020"
+output: 
+  html_document: 
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "readxl", "logging", "table1")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+rpdr_dir <- str_c(pegasus_dir, "rpdr_data/")
+met_dat_dir <- str_c(pegasus_dir, "global_metabolomics_082020/pegasus_global_data_qc/post_qc_data/")
+dat_dir <- "data/"
+res_dir <- "results/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(rpdr_dir, "rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+bb_param_fname <- str_c(rpdr_dir, "PEGASUS_Parameters_2020-04-06.csv")
+vol_fname <- str_c(pegasus_dir, "archive/sample_vol_072020/Biobank_mns43_20200630_142027_x1138_Quantities.xlsx")
+coll_info_fname <- str_c(rpdr_dir, "Biobank_Lasky-Su_PlasmaCollectInfo_PEGASUS.xlsx")
+hilic_pos_halfmin_fname <- str_c(met_dat_dir, "hilic_pos/processed_hilic_pos_halfmin.RData")
+
+```
+
+# 1. Generate matched strata
+
+```{r}
+
+load(hilic_pos_halfmin_fname, verbose = T)
+rm(mets_info, samp_dat_origscale, samp_na)
+samp_dat_final[, .N, .(SampleGroup, Asthma_Status)]
+setnames(samp_dat_final, "BiobankSubjectID", "Biobank_Subject_ID")
+
+strata <- samp_dat_final[SampleGroup == "Asthmatic", .(Biobank_Subject_ID, Match_ID)]
+strata[, stratum := seq_along(Biobank_Subject_ID)]
+
+id_strata <- merge(samp_dat_final[, .(sampleID_biobank, Biobank_Subject_ID, Match_ID, SampleGroup, Asthma_Status, 
+                                      Age, Gender, Race, BMI, Nonsmoker)], 
+                   strata[, .(Biobank_Subject_ID, stratum)], by = "Biobank_Subject_ID", all.x = T)
+setnames(id_strata, "stratum", "Stratum")
+
+strata[, Biobank_Subject_ID := NULL]
+strata[, Biobank_Subject_ID := Match_ID]
+
+id_strata <- merge(id_strata, strata[, .(Biobank_Subject_ID, stratum)], by = "Biobank_Subject_ID", all.x = T)
+id_strata[is.na(Stratum), Stratum := stratum]
+id_strata[, .N, Stratum][, .N, N]
+id_strata[, stratum := NULL]
+
+```
+
+# 2. PEGASUS parameters from Biobank (Apr 2020)
+
+```{r}
+
+bb_param <- fread(bb_param_fname)
+setnames(bb_param, c("Biobank Subject ID", "Vital Status", 
+                     "Asthma - current or past history (custom PPV) [>= 0.80PPV] [List of All Values]"), 
+         c("Biobank_Subject_ID", "Vital_Status", "Asthma_PPV"))
+
+tmp <- merge(bb_param[, c(1:4)], id_strata, by = "Biobank_Subject_ID")
+tmp[, .N, .(Age.x - Age.y)][order(-Age.x)]
+tmp[, .N, .(Race.x == Race.y)]
+tmp[Gender.x != Gender.y, .(Gender.x, Gender.y)]
+
+
+## Extract PPV data
+
+bb_param[, Biobank_Asthma_PPV := gsub("\\[|\\]", "", Asthma_PPV) %>% as.numeric()]
+bb_param[, summary(Biobank_Asthma_PPV)]
+
+id_strata <- merge(id_strata, bb_param[, .(Biobank_Subject_ID, Biobank_Asthma_PPV, Ethnicity)], by = "Biobank_Subject_ID")
+id_strata[, .N, .(SampleGroup, is.na(Biobank_Asthma_PPV))][order(SampleGroup, is.na)]
+
+```
+
+# 3. Serum collection dates
+
+RPDR data for 1138 participants (2 withdrew from Biobank between Apr & Aug 2020)
+
+```{r}
+
+## All subjects with RPDR data
+
+process_biobank_ids <- function(input_file_header = rpdr_file_header,
+                                input_file_ending = rpdr_file_ending) {
+        loginfo("Processing biobank ids file... ")
+        biobank_ids <- data.table(fread(str_c(input_file_header, "Bib", input_file_ending)))
+        biobank_ids <- biobank_ids %>% select(Subject_Id, EMPI) %>% setnames(., "Subject_Id", "Biobank_Subject_ID")
+        loginfo(str_c(nrow(biobank_ids), " subjects processed"))
+        return(biobank_ids)
+}
+aug_subj <- process_biobank_ids()
+
+process_demographics <- function(dt_to_fill,
+                                 input_file_header = rpdr_file_header,
+                                 input_file_ending = rpdr_file_ending) {
+        loginfo("Processing demographics file...")
+        demographics <- data.table(fread(str_c(input_file_header, "Dem", input_file_ending)))
+        setnames(demographics, c("Vital_status", "Marital_status"), c("Vital_Status", "Marital_Status"))
+        dt_to_fill <- merge(dt_to_fill, demographics[, .(EMPI, Gender, Date_of_Birth, Age, Race, Marital_Status, 
+                                                         Date_Of_Death, Vital_Status)], 
+                            by = "EMPI")
+        setnames(dt_to_fill, "Date_Of_Death", "Date_of_Death")
+        loginfo(str_c("Demographic information of ", nrow(dt_to_fill), " subjects added"))
+        return(dt_to_fill)
+}
+aug_subj <- process_demographics(dt_to_fill = aug_subj)
+setnames(aug_subj, c("Age", "Race", "Marital_Status", "Vital_Status"), 
+         str_c(c("Age", "Race", "Marital_Status", "Vital_Status"), "_RPDR_Aug2020"))
+
+
+## Sort out serum sample collection dates
+
+vol <- read_xlsx(vol_fname) %>% as.data.table() # Requested from Biobank for additional sample request
+setnames(vol, c("Biobank_Subject_ID", "Collect_Date", "Plasma_ml", "Serum_ml", "DNA_ug"))
+vol[, Biobank_Subject_ID := as.integer(Biobank_Subject_ID)]
+vol[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+setkey(vol, Biobank_Subject_ID, Collect_Date)
+
+coll_info <- read_xlsx(coll_info_fname) %>% as.data.table()
+setnames(coll_info, c("Biobank_Subject_ID", "Collect_Date", "Plasma_ml", "Freeze_Time_Gap"))
+coll_info[, Biobank_Subject_ID := as.integer(Biobank_Subject_ID)]
+coll_info[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+setkey(coll_info, Biobank_Subject_ID, Collect_Date)
+
+# vol[Biobank_Subject_ID %in% vol[duplicated(Biobank_Subject_ID), unique(Biobank_Subject_ID)], ] %>% datatable()
+# vol[Biobank_Subject_ID %in% vol[duplicated(Biobank_Subject_ID), unique(Biobank_Subject_ID)], ][, .N, by = Biobank_Subject_ID]
+vol[duplicated(Biobank_Subject_ID), unique(Biobank_Subject_ID)] %in% coll_info[, unique(Biobank_Subject_ID)] %>% table()
+
+coll_info[, length(unique(Biobank_Subject_ID))]
+# coll_info[Biobank_Subject_ID == coll_info[duplicated(Biobank_Subject_ID), Biobank_Subject_ID], ]
+# coll_info[Biobank_Subject_ID %in% vol[duplicated(Biobank_Subject_ID), unique(Biobank_Subject_ID)], ] %>% datatable()
+
+
+## Executive desicion: for those with duplicate records, keep chronologically later record
+## For all 23 subjects with 2 records, 22 has an earlier record with plasma & serum vol = 0
+
+vol_trim <- vol[, tail(.SD, 1), by = Biobank_Subject_ID]
+coll_info_trim <- coll_info[, tail(.SD, 1), by = Biobank_Subject_ID]
+
+coll_info_trim[, Biobank_Subject_ID] %in% vol_trim[, Biobank_Subject_ID] %>% table()
+coll_info_trim <- merge(coll_info_trim[, .(Biobank_Subject_ID, Collect_Date, Freeze_Time_Gap)], 
+                        vol_trim[, .(Biobank_Subject_ID, Collect_Date)], 
+                        by = c("Biobank_Subject_ID", "Collect_Date"), all = T)
+
+aug_subj <- merge(aug_subj, coll_info_trim, by = "Biobank_Subject_ID", all.x = T)
+aug_subj[, .N, is.na(Collect_Date)]
+aug_subj[, Age_at_Collection := as.numeric(Collect_Date - as.Date(Date_of_Birth, format = "%m/%d/%Y"))/365.25]
+
+
+## Check ID mapping with metabolomic data
+
+id_strata[Biobank_Subject_ID %in% aug_subj[, Biobank_Subject_ID] & Match_ID %in% aug_subj[, Biobank_Subject_ID], .N, SampleGroup]
+id_strata[Biobank_Subject_ID %in% aug_subj[, Biobank_Subject_ID] & Match_ID %in% aug_subj[, Biobank_Subject_ID], .N, Stratum][, .N, N]
+
+```
+
+# 4. Table 1
+
+```{r}
+
+table1( ~ Age + BMI + Gender + Race + Ethnicity + Nonsmoker | SampleGroup, data = id_strata)
+
+table1( ~ Age_RPDR_Aug2020 + Age_at_Collection + Gender + Race_RPDR_Aug2020 + Marital_Status_RPDR_Aug2020 + 
+          Vital_Status_RPDR_Aug2020 | SampleGroup, 
+        data = merge(aug_subj, id_strata[, .(Biobank_Subject_ID, SampleGroup)], by = "Biobank_Subject_ID"))
+
+```
+
+# 5. Save files
+
+```{r}
+
+id_strata_colldates <- merge(id_strata, 
+                             aug_subj[, .(Biobank_Subject_ID, EMPI, Date_of_Birth, Age_at_Collection, Date_of_Death, 
+                                          Collect_Date, Freeze_Time_Gap, Vital_Status_RPDR_Aug2020, Marital_Status_RPDR_Aug2020)], 
+                             by = "Biobank_Subject_ID", all.x = T)
+fwrite(id_strata_colldates, file = here(dat_dir, "PEGASUS_IDs_Strata_Collection_Dates_Aug2020Demographics.csv"))
+
+fwrite(aug_subj[, .(Biobank_Subject_ID)], file = here(dat_dir, "PEGASUS_IDs_n1138.csv"))
+
+```
+
+# 6. Session info
+
+```{r 5.sess_info}
+
+sessionInfo()
+
+```

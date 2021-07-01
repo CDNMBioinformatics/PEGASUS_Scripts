@@ -1,0 +1,588 @@
+---
+title: "Figures: Conditional Logistic Results"
+author: "Mengna Huang"
+date: "2/13/2020"
+output: 
+  html_document: 
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "ggrepel", "harrypotter", "scales")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+res_dir <- "results/"
+fig_dir <- "figures/res_clogi/"
+
+
+## Filenames
+
+res_fname <- here(res_dir, "res_clogi.RData")
+
+
+## Hard-coded numbers
+
+missing_thld <- 0.10
+sig_digits <- 3
+alpha_thld <- 0.05
+z_95 <- qnorm(p = 0.975)
+
+```
+
+# 1. Load results & prepare data table for plots
+
+```{r 1.load_res}
+
+load(res_fname, verbose = T)
+
+
+## Model results to show
+
+res_long <- rbind(res_crd[, model := "crude"], 
+                  res_bmi[, model := "BMI adjusted (n-pairs=293)"], 
+                  res_crd_wbmi[, model := "in subject w BMI (not BMI adjusted)"], 
+                  res_normal[, model := "exclude red/milky samples (n-pairs=545)"])
+res_long[, dir_eff := case_when(or > 1 ~ "positive", 
+                                or <= 1 ~ "negative")]
+res_long[, dir_eff := factor(dir_eff, levels = c("negative", "positive"))]
+res_long[, model := factor(model, levels = c("crude", "BMI adjusted (n-pairs=293)", "in subject w BMI (not BMI adjusted)", 
+                                             "exclude red/milky samples (n-pairs=545)"))]
+res_long[, metabolite := factor(metabolite, levels = c(sphoth_list, sm_list, cer_list, ceroth_list))]
+res_long[, rev_metabolite := factor(metabolite, levels = rev(levels(metabolite)))]
+
+
+## Models results with minimal change from crude
+
+res_unused <- rbind(res_crd[, model := "crude"], 
+                    res_arh[, model := "allergic rhinitis adjusted"], 
+                    res_fa[, model := "food allergy #Dx adjusted"], 
+                    res_alg[, model := "unspecified allergy #Dx adjusted"])
+res_unused[, dir_eff := case_when(or > 1 ~ "positive", 
+                                  or <= 1 ~ "negative")]
+res_unused[, dir_eff := factor(dir_eff, levels = c("negative", "positive"))]
+res_unused[, model := factor(model, levels = c("crude", "allergic rhinitis adjusted", "food allergy #Dx adjusted", 
+                                               "unspecified allergy #Dx adjusted"))]
+res_unused[, metabolite := factor(metabolite, levels = c(sphoth_list, sm_list, cer_list, ceroth_list))]
+res_unused[, rev_metabolite := factor(metabolite, levels = rev(levels(metabolite)))]
+
+```
+
+# 1. Volcano plots
+## 1.1. Crude model results
+
+```{r 1.1.volc_crd}
+
+res_crd[fdr_bh < alpha_thld, max(pval)]
+res_crd[fdr_bh >= alpha_thld, min(pval)]
+fdr_thld <- 0.014
+
+bonf_thld <- 0.05/mets_info[, length(metabolite)]
+
+ggplot(res_crd, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "black", linetype = 2) + 
+        geom_hline(yintercept = -log10(fdr_thld), color = "#00798c", linetype = 2) + 
+        geom_hline(yintercept = -log10(bonf_thld), color = "#edae49", linetype = 2) + 
+        labs(title = "Crude conditional logistic model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = 0, color = "black", size = 4) + 
+        annotate("text", x = 0, y = -log10(fdr_thld), label = "FDR_BH == 0.05", parse = T, 
+                 vjust = 1.5, hjust = 0, color = "#00798c", size = 4) + 
+        annotate("text", x = 0, y = -log10(bonf_thld), label = "Bonferroni threshold", parse = F, 
+                 vjust = 1.5, hjust = 0, color = "#edae49", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < fdr_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_crd.jpg"), width = 12, height = 7)
+
+ggplot(res_crd_wbmi, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Crude conditional logistic model results in subjects with BMI (not BMI-adjusted)", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = 0, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_crd_subj_wbmi.jpg"), width = 12, height = 7)
+
+```
+
+## 1.2. Restricted to normal blood samples
+
+```{r 1.2.volc_normal}
+
+res_normal[fdr_bh < alpha_thld, max(pval)]
+res_normal[fdr_bh >= alpha_thld, min(pval)]
+fdr_thld <- 0.01
+
+ggplot(res_normal, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "black", linetype = 2) + 
+        geom_hline(yintercept = -log10(fdr_thld), color = "#00798c", linetype = 2) + 
+        geom_hline(yintercept = -log10(bonf_thld), color = "#edae49", linetype = 2) + 
+        labs(title = "Crude conditional logistic model results - exclude red/milky samples", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = 0, color = "black", size = 4) + 
+        annotate("text", x = 0, y = -log10(fdr_thld), label = "FDR_BH == 0.05", parse = T, 
+                 vjust = 1.5, hjust = 0, color = "#00798c", size = 4) + 
+        annotate("text", x = 0, y = -log10(bonf_thld), label = "Bonferroni threshold", parse = F, 
+                 vjust = 1.5, hjust = 0, color = "#edae49", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < fdr_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_normal.jpg"), width = 12, height = 7)
+
+```
+
+## 1.3. BMI adjusted results
+
+```{r 1.3.volc_bmi}
+
+ggplot(res_bmi, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "BMI-adjusted conditional logistic model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_bmi.jpg"), width = 12, height = 7)
+
+```
+
+## 1.4. Association with ICS/OCS
+
+```{r 1.4.volc_mets_cs}
+
+## ICS
+
+ggplot(mets_pheno_trim[Group == "Asthmatic", ]) + 
+        geom_histogram(aes(inhaled_steriod_prescriptions), bins = 30) + 
+        labs(title = "Number of ICS prescriptions in asthmatics") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "ics_asthmatics.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_ics, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of ICS prescriptions - linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_ics.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_ics_bmi, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of ICS prescriptions - BMI-adjusted linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld*2, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_ics_bmi.jpg"), width = 12, height = 7)
+
+
+## OCS
+
+ggplot(mets_pheno_trim[Group == "Asthmatic", ]) + 
+        geom_histogram(aes(oral_steroid_prescriptions), bins = 30) + 
+        labs(title = "Number of OCS prescriptions in asthmatics") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "ocs_asthmatics.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_ocs, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of OCS prescriptions - linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_ocs.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_ocs_bmi, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of OCS prescriptions - BMI-adjusted linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld*2, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_ocs_bmi.jpg"), width = 12, height = 7)
+
+
+## Bronchodilator
+
+ggplot(mets_pheno_trim[Group == "Asthmatic", ]) + 
+        geom_histogram(aes(bronchodialator_prescriptions), bins = 30) + 
+        labs(title = "Number of bronchodilator prescriptions in asthmatics") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "bd_asthmatics.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_bd, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of bronchodilator prescriptions - linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_bd.jpg"), width = 12, height = 7)
+
+ggplot(res_mets_bd_bmi, aes(x = beta, y = -log10(pval))) + 
+        geom_point(alpha = 0.4, size = 2.5) + 
+        geom_hline(yintercept = -log10(alpha_thld), color = "#00798c", linetype = 2) + 
+        labs(title = "Metabolites & number of bronchodilator prescriptions - BMI-adjusted linear model results", 
+             x = expression('Estimated '*beta), 
+             y = expression('-log'[10]*'('*italic(P)*'-value)')) + 
+        annotate("text", x = 0, y = -log10(alpha_thld), label = "P_value == 0.05", parse = T, 
+                 vjust = 1.5, hjust = -1.8, color = "#00798c", size = 4) + 
+        geom_label_repel(aes(label = ifelse(pval < alpha_thld, metabolite, "")),
+                  box.padding   = 0.25, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+ggsave(here(fig_dir, "volc_mets_bd_bmi.jpg"), width = 12, height = 7)
+
+```
+
+# 2. OR & CI plots for metabolites
+## 2.1. Model results to show
+### 2.1.1. Sphingolipids other
+
+```{r 2.1.1.sphoth}
+
+ggplot(res_long[metabolite %in% sphoth_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_long[metabolite %in% sphoth_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "sphoth_or95ci.jpg"), width = 14, height = 7)
+
+```
+
+### 2.1.2. SM
+
+```{r 2.1.2.sm}
+
+ggplot(res_long[metabolite %in% sm_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_long[metabolite %in% sm_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "sm_or95ci.jpg"), width = 14, height = 7)
+
+```
+
+### 2.1.3. Cermides
+
+```{r 2.1.3.cer}
+
+ggplot(res_long[metabolite %in% cer_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_long[metabolite %in% cer_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "cer_or95ci.jpg"), width = 14, height = 7)
+
+ggplot(res_long[metabolite %in% ceroth_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_long[metabolite %in% ceroth_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "ceroth_or95ci.jpg"), width = 14, height = 7)
+
+```
+
+## 2.2. Model results with minimal change from crude
+### 2.2.1. Sphingolipids other
+
+```{r 2.2.1.sphoth}
+
+ggplot(res_unused[metabolite %in% sphoth_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_unused[metabolite %in% sphoth_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "sphoth_or95ci_min_change_crd.jpg"), width = 14, height = 7)
+
+```
+
+### 2.2.2. SM
+
+```{r 2.2.2.sm}
+
+ggplot(res_unused[metabolite %in% sm_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_unused[metabolite %in% sm_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "sm_or95ci_min_change_crd.jpg"), width = 14, height = 7)
+
+```
+
+### 2.2.3. Cermides
+
+```{r 2.2.3.cer}
+
+ggplot(res_unused[metabolite %in% cer_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_unused[metabolite %in% cer_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "cer_or95ci_min_change_crd.jpg"), width = 14, height = 7)
+
+ggplot(res_unused[metabolite %in% ceroth_list, ], aes(x = rev_metabolite, y = or)) + 
+        facet_grid(. ~ model) + 
+        geom_errorbar(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                      width = 0.25) + 
+        geom_pointrange(aes(ymin = lower95, ymax = upper95, color = dir_eff), 
+                        size = 0.5) + 
+        scale_colour_hp_d(option = "Ravenclaw", name = "direction of effect") + 
+        geom_hline(yintercept = 1, linetype = 2) + 
+        labs(title = "Metabolites & asthma status", 
+             x = "Metabolite", y = "Odds Ratio (95% Confidence Interval)") + 
+        theme_minimal() + 
+        theme(title = element_text(size = 16), 
+              strip.text = element_text(size = 12), 
+              axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              legend.position = "bottom",
+              legend.title = element_text(size = 12), 
+              legend.text = element_text(size = 12)) + 
+        scale_y_continuous(trans = log_trans(), 
+                           breaks = axisTicks(log(range(res_unused[metabolite %in% ceroth_list, or])), 
+                                              log = TRUE)) + 
+        coord_flip() 
+ggsave(here(fig_dir, "ceroth_or95ci_min_change_crd.jpg"), width = 14, height = 7)
+
+```
+
+# 4. Session info
+
+```{r 4.sess_info}
+
+sessionInfo()
+
+```

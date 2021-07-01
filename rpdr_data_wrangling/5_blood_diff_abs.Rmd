@@ -1,0 +1,661 @@
+---
+title: "PEGASUS Labs"
+author: "MHuang"
+date: "10/2/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_102020_blood_diff_absolute/mq116_100920154626312764_")
+rpdr_file_ending <- ".txt" 
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+```
+
+# 1. Laboratory tests data
+## 1.1. Read in data & parse out different labs
+
+This is the hematology labs of blood differential absolute requested Oct 7, 2020
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+lab <- fread(str_c(rpdr_file_header, "Lab", rpdr_file_ending), quote = "")
+lab[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+lab[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+lab[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+lab[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                    Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+
+lab <- merge(lab, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+lab[, lab_timegap_d := as.numeric(Collect_Date - Lab_Date)]
+lab[, lab_timegap_y := lab_timegap_d/365.25]
+lab[, summary(lab_timegap_y)]
+
+lab_condensed <- unique(lab[, .(Group_Id, Loinc_Code, Test_Id, Test_Description, Specimen_Type)])
+
+lab_condensed[grepl("(?i)eos", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)eos", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+eos_code <- unique(lab_condensed[grepl("(?i)eos", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)neut", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)neut", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+neut_code <- unique(lab_condensed[grepl("(?i)neut", Group_Id), ][!grepl("(?i)vacuo", Group_Id), Loinc_Code])
+neut_vacuo_code <- unique(lab_condensed[grepl("(?i)neut", Group_Id), ][grepl("(?i)vacuo", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)baso", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)baso", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+baso_code <- unique(lab_condensed[grepl("(?i)baso", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)lymph", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)lymph", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+lymph_code <- unique(lab_condensed[grepl("(?i)lymph", Group_Id), ][!grepl("(?i)atypical", Group_Id), Loinc_Code])
+lymph_atyp_code <- unique(lab_condensed[grepl("(?i)lymph", Group_Id), ][grepl("(?i)atypical", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)mono", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)mono", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+mono_code <- unique(lab_condensed[grepl("(?i)mono", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)band", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)band", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+band_code <- unique(lab_condensed[grepl("(?i)band", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)blast", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)blast", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+blast_code <- unique(lab_condensed[grepl("(?i)blast", Group_Id), Loinc_Code])
+
+lab_condensed[grepl("(?i)plasma", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)plasma", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+plasma_cells_code <- unique(lab_condensed[grepl("(?i)plasma", Group_Id), Loinc_Code])
+
+```
+
+## 1.2. Subset out labs after serum collection
+
+This will effectively exclude subjects with no serum collection date
+
+```{r}
+
+lab_trim <- lab[Lab_Date <= Collect_Date, ]
+lab_trim[, length(unique(EMPI))] 
+lab_trim[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+
+```
+
+# 2. Eosinophil
+
+```{r}
+
+eos_long <- lab[Loinc_Code %in% eos_code, ]
+eos_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up eos counts data (test results & unit, missingness etc.)
+
+eos_long[, ':='(eos_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                eos = as.numeric(Result), 
+                eos_date = Lab_Date)]
+eos_long[is.na(eos), .N, Result] %>% datatable()
+eos_long[grep("/", Result), ':='(eos = gsub("([0-9]+)/(.*)", "\\1", Result) %>% as.numeric(), 
+                                 Reference_Units = gsub("([0-9]+)/(.*)", "/\\2", Result))]
+
+eos_long[, .N, Reference_Units] %>% datatable()
+eos_long[Reference_Units == "", .N, .(Result, eos)] %>% datatable()
+eos_long[!is.na(eos), .N, .(eos < 5, Reference_Units)][order(eos, Reference_Units)] %>% datatable()
+# eos_long[eos >= 5, ] %>% datatable()
+# eos_long[eos >= 5 & grepl("^[K|th]", Reference_Units) & Abnormal_Flag == "", 
+#          .(EMPI, Group_Id, Test_Description, Result, Abnormal_Flag, Reference_Units, Reference_Range, eos)]
+eos_long[eos >= 5 & grepl("^[K|th]", Reference_Units) & Abnormal_Flag == "", 
+         eos := eos/1000]
+eos_long[eos >= 5 & Reference_Units %in% c("/CMM", "/CUMM", "/cumm", "UL"), eos := eos/1000]
+eos_long[!is.na(eos), ':='(eos_unit = "K/uL", 
+                           eos_ref_range = Reference_Range, 
+                           eos_abnormal_flg = Abnormal_Flag)]
+
+eos_long <- eos_long[!is.na(eos) & !is.na(Collect_Date), ]
+
+```
+
+## 2.1. Extract last record before serum collection
+
+```{r}
+
+eos_long[, summary(eos_timegap_d)]
+eos_long[, ':='(eos_timegap_y = eos_timegap_d/365.25, 
+                eos_timegap_d_abs = abs(eos_timegap_d))]
+eos_long[, summary(eos_timegap_y)]
+
+setkey(eos_long, EMPI, eos_timegap_d)
+eos_lastbf <- eos_long[eos_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+eos_lastbf[, .N, .(eos_timegap_d <= 7, eos_timegap_y <= 1)] %>% 
+        setnames(., c("eos_timegap<=7d_before", "eos_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(eos_lastbf) + 
+        geom_histogram(aes(eos_timegap_y), bins = 200) + 
+        labs(title = "Timing of eosinophil record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 951") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(eos_lastbf) +
+        geom_histogram(aes(eos), bins = 200) +
+        labs(title = "Eosinophil count last before/on serum collection",
+             x = "Eos (K/uL)",
+             caption = "n = 951") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 2.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(eos_long, EMPI, eos_timegap_d_abs)
+eos_closest <- eos_long[, head(.SD, 1), EMPI]
+eos_closest[, .N, .(eos_timegap_d_abs <= 7, abs(eos_timegap_y) <= 1)] %>% 
+        setnames(., c("eos_absolute_timegap<=7d", "eos_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(eos_closest) + 
+        geom_histogram(aes(eos_timegap_y), bins = 200) + 
+        labs(title = "Timing of eosinophil record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1045") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(eos_closest) +
+        geom_histogram(aes(eos), bins = 200) +
+        labs(title = "Eosinophil count closest to serum collection",
+             x = "Eos (K/uL)",
+             caption = "n = 1045") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 3. Neutrophil
+
+```{r}
+
+neut_long <- lab[Loinc_Code %in% neut_code, ]
+neut_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up neut counts data (test results & unit, missingness etc.)
+
+neut_long[, ':='(neut_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                 neut = as.numeric(Result), 
+                 neut_date = Lab_Date)]
+neut_long[is.na(neut), .N, Result] %>% datatable()
+
+neut_long[, .N, Reference_Units] %>% datatable()
+neut_long[Reference_Units %in% c("", "UL"), .N, .(Result, neut, Reference_Units, Reference_Range, 
+                                                  Abnormal_Flag)] %>% datatable()
+neut_long <- neut_long[!(Reference_Units %in% c("%", "UL")), ]
+neut_long[!is.na(neut), ':='(neut_unit = "K/uL", 
+                             neut_ref_range = Reference_Range, 
+                             neut_abnormal_flg = Abnormal_Flag)]
+
+neut_long <- neut_long[!is.na(neut) & !is.na(Collect_Date), ]
+
+```
+
+## 3.1. Extract last record before serum collection
+
+```{r}
+
+neut_long[, summary(neut_timegap_d)]
+neut_long[, ':='(neut_timegap_y = neut_timegap_d/365.25, 
+                 neut_timegap_d_abs = abs(neut_timegap_d))]
+neut_long[, summary(neut_timegap_y)]
+
+setkey(neut_long, EMPI, neut_timegap_d)
+neut_lastbf <- neut_long[neut_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+neut_lastbf[, .N, .(neut_timegap_d <= 7, neut_timegap_y <= 1)] %>% 
+        setnames(., c("neut_timegap<=7d_before", "neut_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(neut_lastbf) + 
+        geom_histogram(aes(neut_timegap_y), bins = 200) + 
+        labs(title = "Timing of neutrophil record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 951") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(neut_lastbf) +
+        geom_histogram(aes(neut), bins = 200) +
+        labs(title = "Neutrophil count last before/on serum collection",
+             x = "Neut (K/uL)",
+             caption = "n = 951") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 3.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(neut_long, EMPI, neut_timegap_d_abs)
+neut_closest <- neut_long[, head(.SD, 1), EMPI]
+neut_closest[, .N, .(neut_timegap_d_abs <= 7, abs(neut_timegap_y) <= 1)] %>% 
+        setnames(., c("neut_absolute_timegap<=7d", "neut_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(neut_closest) + 
+        geom_histogram(aes(neut_timegap_y), bins = 200) + 
+        labs(title = "Timing of neutrophil record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1052") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(neut_closest) +
+        geom_histogram(aes(neut), bins = 200) +
+        labs(title = "Neutrophil count closest to serum collection",
+             x = "Neut (K/uL)",
+             caption = "n = 1052") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 4. Basophil
+
+```{r}
+
+baso_long <- lab[Loinc_Code %in% baso_code, ]
+baso_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up baso counts data (test results & unit, missingness etc.)
+
+baso_long[, ':='(baso_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                 baso = as.numeric(Result), 
+                 baso_date = Lab_Date)]
+baso_long[is.na(baso), .N, Result] %>% datatable()
+
+baso_long[, .N, Reference_Units] %>% datatable()
+baso_long[Reference_Units == "", .N, .(Result, baso, Reference_Units, Reference_Range, 
+                                       Abnormal_Flag)] %>% datatable()
+baso_long[!is.na(baso), ':='(baso_unit = "K/uL", 
+                             baso_ref_range = Reference_Range, 
+                             baso_abnormal_flg = Abnormal_Flag)]
+
+baso_long <- baso_long[!is.na(baso) & !is.na(Collect_Date), ]
+
+```
+
+## 4.1. Extract last record before serum collection
+
+```{r}
+
+baso_long[, summary(baso_timegap_d)]
+baso_long[, ':='(baso_timegap_y = baso_timegap_d/365.25, 
+                 baso_timegap_d_abs = abs(baso_timegap_d))]
+baso_long[, summary(baso_timegap_y)]
+
+setkey(baso_long, EMPI, baso_timegap_d)
+baso_lastbf <- baso_long[baso_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+baso_lastbf[, .N, .(baso_timegap_d <= 7, baso_timegap_y <= 1)] %>% 
+        setnames(., c("baso_timegap<=7d_before", "baso_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(baso_lastbf) + 
+        geom_histogram(aes(baso_timegap_y), bins = 200) + 
+        labs(title = "Timing of basophil record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 951") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(baso_lastbf) +
+        geom_histogram(aes(baso), bins = 200) +
+        labs(title = "Basophil count last before/on serum collection",
+             x = "Baso (K/uL)",
+             caption = "n = 951") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 4.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(baso_long, EMPI, baso_timegap_d_abs)
+baso_closest <- baso_long[, head(.SD, 1), EMPI]
+baso_closest[, .N, .(baso_timegap_d_abs <= 7, abs(baso_timegap_y) <= 1)] %>% 
+        setnames(., c("baso_absolute_timegap<=7d", "baso_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(baso_closest) + 
+        geom_histogram(aes(baso_timegap_y), bins = 200) + 
+        labs(title = "Timing of basophil record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1046") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(baso_closest) +
+        geom_histogram(aes(baso), bins = 200) +
+        labs(title = "Basophil count closest to serum collection",
+             x = "Baso (K/uL)",
+             caption = "n = 1046") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 5. Lymphocyte
+
+```{r}
+
+lymph_long <- lab[Loinc_Code %in% lymph_code, ]
+lymph_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up lymph counts data (test results & unit, missingness etc.)
+
+lymph_long[, ':='(lymph_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                 lymph = as.numeric(Result), 
+                 lymph_date = Lab_Date)]
+lymph_long[is.na(lymph), .N, Result] %>% datatable()
+
+lymph_long[, .N, Reference_Units] %>% datatable()
+lymph_long[Reference_Units == "", .N, .(Result, lymph, Reference_Units, Reference_Range, 
+                                        Abnormal_Flag)] %>% datatable()
+lymph_long[Reference_Units %in% c("#/mm3", "/uL", "/mm3"), .N, 
+           .(Result, lymph, Reference_Units, Reference_Range, Abnormal_Flag)] %>% datatable()
+lymph_long[Reference_Units %in% c("#/mm3", "/uL", "/mm3"), lymph := lymph/1000]
+
+lymph_long[!is.na(lymph), ':='(lymph_unit = "K/uL", 
+                               lymph_ref_range = Reference_Range, 
+                               lymph_abnormal_flg = Abnormal_Flag)]
+
+lymph_long <- lymph_long[!is.na(lymph) & !is.na(Collect_Date), ]
+
+```
+
+## 5.1. Extract last record before serum collection
+
+```{r}
+
+lymph_long[, summary(lymph_timegap_d)]
+lymph_long[, ':='(lymph_timegap_y = lymph_timegap_d/365.25, 
+                  lymph_timegap_d_abs = abs(lymph_timegap_d))]
+lymph_long[, summary(lymph_timegap_y)]
+
+setkey(lymph_long, EMPI, lymph_timegap_d)
+lymph_lastbf <- lymph_long[lymph_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+lymph_lastbf[, .N, .(lymph_timegap_d <= 7, lymph_timegap_y <= 1)] %>% 
+        setnames(., c("lymph_timegap<=7d_before", "lymph_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(lymph_lastbf) + 
+        geom_histogram(aes(lymph_timegap_y), bins = 200) + 
+        labs(title = "Timing of lymphocyte record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 960") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(lymph_lastbf) +
+        geom_histogram(aes(lymph), bins = 200) +
+        labs(title = "Lymphocyte count last before/on serum collection",
+             x = "Lymph (K/uL)",
+             caption = "n = 960") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 5.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(lymph_long, EMPI, lymph_timegap_d_abs)
+lymph_closest <- lymph_long[, head(.SD, 1), EMPI]
+lymph_closest[, .N, .(lymph_timegap_d_abs <= 7, abs(lymph_timegap_y) <= 1)] %>% 
+        setnames(., c("lymph_absolute_timegap<=7d", "lymph_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(lymph_closest) + 
+        geom_histogram(aes(lymph_timegap_y), bins = 200) + 
+        labs(title = "Timing of lymphocyte record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1052") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(lymph_closest) +
+        geom_histogram(aes(lymph), bins = 200) +
+        labs(title = "Lymphocyte count closest to serum collection",
+             x = "Lymph (K/uL)",
+             caption = "n = 1052") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 6. Monocyte
+
+```{r}
+
+mono_long <- lab[Loinc_Code %in% mono_code, ]
+mono_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+
+
+## Clean up mono counts data (test results & unit, missingness etc.)
+
+mono_long[, ':='(mono_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                 mono = as.numeric(Result), 
+                 mono_date = Lab_Date)]
+mono_long[is.na(mono), .N, Result] %>% datatable()
+
+mono_long[, .N, Reference_Units] %>% datatable()
+mono_long[Reference_Units == "", .N, .(Result, mono, Reference_Units, Reference_Range, 
+                                       Abnormal_Flag)] %>% datatable()
+
+mono_long[!is.na(mono), ':='(mono_unit = "K/uL", 
+                             mono_ref_range = Reference_Range, 
+                             mono_abnormal_flg = Abnormal_Flag)]
+
+mono_long <- mono_long[!is.na(mono) & !is.na(Collect_Date), ]
+
+```
+
+## 6.1. Extract last record before serum collection
+
+```{r}
+
+mono_long[, summary(mono_timegap_d)]
+mono_long[, ':='(mono_timegap_y = mono_timegap_d/365.25, 
+                 mono_timegap_d_abs = abs(mono_timegap_d))]
+mono_long[, summary(mono_timegap_y)]
+
+setkey(mono_long, EMPI, mono_timegap_d)
+mono_lastbf <- mono_long[mono_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+mono_lastbf[, .N, .(mono_timegap_d <= 7, mono_timegap_y <= 1)] %>% 
+        setnames(., c("mono_timegap<=7d_before", "mono_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(mono_lastbf) + 
+        geom_histogram(aes(mono_timegap_y), bins = 200) + 
+        labs(title = "Timing of monocyte record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 954") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(mono_lastbf) +
+        geom_histogram(aes(mono), bins = 200) +
+        labs(title = "Monocyte count last before/on serum collection",
+             x = "Mono (K/uL)",
+             caption = "n = 954") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 6.2. Extract record closest to serum collection
+
+```{r}
+
+setkey(mono_long, EMPI, mono_timegap_d_abs)
+mono_closest <- mono_long[, head(.SD, 1), EMPI]
+mono_closest[, .N, .(mono_timegap_d_abs <= 7, abs(mono_timegap_y) <= 1)] %>% 
+        setnames(., c("mono_absolute_timegap<=7d", "mono_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(mono_closest) + 
+        geom_histogram(aes(mono_timegap_y), bins = 200) + 
+        labs(title = "Timing of monocyte record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1049") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(mono_closest) +
+        geom_histogram(aes(mono), bins = 200) +
+        labs(title = "Monocyte count closest to serum collection",
+             x = "Mono (K/uL)",
+             caption = "n = 1049") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# 7. Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+wbc_count_lastbf <- merge(eos_lastbf[, .(EMPI, eos, eos_date, eos_unit, eos_timegap_d, 
+                                         eos_timegap_y, eos_ref_range, eos_abnormal_flg)], 
+                          neut_lastbf[, .(EMPI, neut, neut_date, neut_unit, neut_timegap_d, 
+                                          neut_timegap_y, neut_ref_range, neut_abnormal_flg)], 
+                          by = "EMPI", all = T)
+wbc_count_lastbf <- merge(wbc_count_lastbf, 
+                          baso_lastbf[, .(EMPI, baso, baso_date, baso_unit, baso_timegap_d, 
+                                          baso_timegap_y, baso_ref_range, baso_abnormal_flg)], 
+                          by = "EMPI", all = T)
+wbc_count_lastbf <- merge(wbc_count_lastbf, 
+                          lymph_lastbf[, .(EMPI, lymph, lymph_date, lymph_unit, lymph_timegap_d, 
+                                           lymph_timegap_y, lymph_ref_range, lymph_abnormal_flg)], 
+                          by = "EMPI", all = T)
+wbc_count_lastbf <- merge(wbc_count_lastbf, 
+                          mono_lastbf[, .(EMPI, mono, mono_date, mono_unit, mono_timegap_d, 
+                                          mono_timegap_y, mono_ref_range, mono_abnormal_flg)], 
+                          by = "EMPI", all = T)
+fwrite(wbc_count_lastbf, file = here(dat_dir, "wbc_count_last_before_serum_collection.csv"))
+
+wbc_count_closest <- merge(eos_closest[, .(EMPI, eos, eos_date, eos_unit, eos_timegap_d, 
+                                           eos_timegap_y, eos_ref_range, eos_abnormal_flg)], 
+                           neut_closest[, .(EMPI, neut, neut_date, neut_unit, neut_timegap_d, 
+                                            neut_timegap_y, neut_ref_range, neut_abnormal_flg)], 
+                           by = "EMPI", all = T)
+wbc_count_closest <- merge(wbc_count_closest, 
+                           baso_closest[, .(EMPI, baso, baso_date, baso_unit, baso_timegap_d, 
+                                            baso_timegap_y, baso_ref_range, baso_abnormal_flg)], 
+                           by = "EMPI", all = T)
+wbc_count_closest <- merge(wbc_count_closest, 
+                           lymph_closest[, .(EMPI, lymph, lymph_date, lymph_unit, lymph_timegap_d, 
+                                             lymph_timegap_y, lymph_ref_range, lymph_abnormal_flg)], 
+                           by = "EMPI", all = T)
+wbc_count_closest <- merge(wbc_count_closest, 
+                           mono_closest[, .(EMPI, mono, mono_date, mono_unit, mono_timegap_d, 
+                                            mono_timegap_y, mono_ref_range, mono_abnormal_flg)], 
+                           by = "EMPI", all = T)
+fwrite(wbc_count_closest, file = here(dat_dir, "wbc_count_closest_to_serum_collection.csv"))
+
+
+## Save long format data
+
+fwrite(eos_long, file = here(long_fmt_dir, "eosinophil_long.csv"))
+fwrite(neut_long, file = here(long_fmt_dir, "neutrophil_long.csv"))
+fwrite(baso_long, file = here(long_fmt_dir, "basophil_long.csv"))
+fwrite(lymph_long, file = here(long_fmt_dir, "lymphocyte_long.csv"))
+fwrite(mono_long, file = here(long_fmt_dir, "monocyte_long.csv"))
+
+```
+
+# 8. Session info
+
+```{r}
+
+sessionInfo()
+
+```

@@ -1,0 +1,164 @@
+---
+title: "PEGASUS cortisol  global metabolomics"
+subtitle: "HILIC positive"
+author: "MHuang"
+date: "6/11/2021"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dat_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/global_metabolomics_082020/pegasus_global_analyses/data/"
+res_dir <- "results/"
+
+
+## Filenames
+
+all_platform_data_fname <- str_c(pegasus_dat_dir, "all_platforms_data_updated.RData")
+
+
+## Hard-coded numbers
+
+missing_thld <- 0.30
+sig_digits <- 3
+alpha_thld <- 0.05
+z_95 <- qnorm(p = 0.975)
+
+```
+
+# 1. Load data
+
+```{r}
+
+load(all_platform_data_fname, verbose = T)
+colnames(mets_info_all)
+length(mets_list_analysis)
+
+```
+
+# 2. Linear regression function
+
+```{r}
+
+linear_res_fnc <- function(expo, mets_list, dat, mets_info, add_covar = "", 
+                           first_cols = c("feat_id", "feature", "expo", "beta", "pval", "tentative_annotation", 
+                                          "wo_ms2", "med_feat", "rt_min", "mz", "platform", "cv", "pct_na_met"), 
+                           na_thld = missing_thld) {
+        
+        linear_mdl_tmp <- function(met) {
+                
+                fit <- eval(parse(text = str_c("lm(", met, " ~ ", expo, " + Age + race", 
+                                               add_covar, ", data = ", dat, ")")))
+                
+                coef <- summary(fit)$coefficients
+                coef <- coef[rownames(coef) == expo, ]
+
+                output <- t(c(expo, met, coef)) %>% as.data.table()
+                colnames(output) <- c("expo", "feat_id", "beta", "se", "tval", "pval")
+                output[, (colnames(output)[-c(1:2)]) := lapply(.SD, as.numeric), .SDcols = colnames(output)[-c(1:2)]]
+                
+                return(output)
+        }
+        
+        res <- lapply(mets_list, function(x) {linear_mdl_tmp(met = x)}) %>% rbindlist()
+        
+        eval(parse(text = str_c("mets_info <- copy(", mets_info, ")")))
+        res <- merge(res, 
+                     mets_info[, .(feat_id, feature, rt_min, mz, tentative_annotation, wo_ms2, med_feat, 
+                                   platform, cv, pct_na_met, skewness_post)], 
+                     by = "feat_id")
+
+        setcolorder(res, first_cols)
+        res <- res[order(pval)]
+        return(res)
+}
+
+```
+
+# 3. Cortisol (F1381) & ICS within asthmatics
+
+```{r}
+
+pheno_mets[Asthma_Status == T, summary(ics_trim_totnum_1y)]
+pheno_mets[Asthma_Status == T, .N, .(is.na(fev1_prebd_pctpred), is.na(fvc_prebd_pctpred), 
+                                     is.na(fev1fvc_prebd_pctpred))]
+
+cort_dat <- pheno_mets[Asthma_Status == T & !is.na(ics_trim_totnum), ]
+for (y in c("", "_1y", "_2y", "_3y", "_5y", "_10y")) {
+        eval(parse(text = str_c("cort_dat[, ':='(ics_trim_totnum", y, "_gt0 = ifelse(ics_trim_totnum", y, " > 0, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt1 = ifelse(ics_trim_totnum", y, " > 1, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt2 = ifelse(ics_trim_totnum", y, " > 2, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt3 = ifelse(ics_trim_totnum", y, " > 3, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt4 = ifelse(ics_trim_totnum", y, " > 4, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt5 = ifelse(ics_trim_totnum", y, " > 5, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt6 = ifelse(ics_trim_totnum", y, " > 6, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt7 = ifelse(ics_trim_totnum", y, " > 7, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt8 = ifelse(ics_trim_totnum", y, " > 8, 1, 0), 
+                                                 ics_trim_totnum", y, "_gt9 = ifelse(ics_trim_totnum", y, " > 9, 1, 0))]")))
+}
+
+suf_list <- cross(list(c("", "_1y", "_2y", "_3y", "_5y", "_10y"), 
+                       c("", str_c("_gt", c(0:9))))) %>% 
+        map_chr(paste, sep = "", collapse = "")
+
+
+## Sample size for high counts of prescriptions
+
+cort_dat[!is.na(fev1_prebd_pctpred), .N, .(ics_trim_totnum_1y > 6, ics_trim_totnum_1y_gt6)]
+cort_dat[!is.na(fev1_prebd_pctpred), .N, .(ics_trim_totnum_1y > 7, ics_trim_totnum_1y_gt7)]
+cort_dat[!is.na(fev1_prebd_pctpred), .N, .(ics_trim_totnum_1y > 8, ics_trim_totnum_1y_gt8)]
+cort_dat[!is.na(fev1_prebd_pctpred), .N, .(ics_trim_totnum_1y > 9, ics_trim_totnum_1y_gt9)]
+
+res_ics_cortisol_asthmatics <- NULL
+for (y in suf_list) {
+        for (lf in c("", " + fev1_prebd_pctpred", " + fvc_prebd_pctpred", " + fev1fvc_prebd_pctpred")) {
+                res_tmp <- linear_res_fnc(expo = str_c("ics_trim_totnum", y), 
+                                          mets_list = c("F1381_hilic_pos"), 
+                                          dat = "cort_dat", 
+                                          mets_info = "hilic_pos_mets_info", 
+                                          add_covar = str_c(" + Gender + bmi", lf))
+                res_tmp[, lungfnc_adjust := lf]
+                res_ics_cortisol_asthmatics <- rbind(res_ics_cortisol_asthmatics, res_tmp)
+        }
+}
+setcolorder(res_ics_cortisol_asthmatics, 
+            c("feat_id", "tentative_annotation", "expo", "lungfnc_adjust", "beta", "pval"))
+datatable(res_ics_cortisol_asthmatics[pval < alpha_thld, c(1:6)], 
+          caption = "Cortisol ~ number of ICS prescriptions (associations with p<0.05)") %>%
+        formatSignif(columns = c("beta", "pval"), digits = 3)
+
+fwrite(res_ics_cortisol_asthmatics, file = here(res_dir, "results_ics_cortisol_asthmatics.csv"))
+
+```
+
+# Session info
+
+```{r}
+
+sessionInfo()
+
+```

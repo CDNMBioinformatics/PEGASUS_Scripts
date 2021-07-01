@@ -1,0 +1,295 @@
+---
+title: "PEGASUS Encounters with MGB System & Health History"
+author: "MHuang"
+date: "9/22/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "readxl", "DT", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+long_fmt_dir <- "data/long_format/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+all_subj_fname <- here(dat_dir, "PEGASUS_IDs_Strata_Collection_Dates_Aug2020Demographics.csv")
+
+```
+
+# 1. Encounters data
+## 1.1. Read in & general data check
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, is.na(Collect_Date)]
+all_subj[is.na(Collect_Date), Stratum]
+
+ggplot(all_subj) + 
+        geom_point(aes(Age, Age_at_Collection), alpha = 0.5) + 
+        labs(title = "Age at serum collection vs age at Biobank selection", 
+             caption = "n = 1136") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+enc <- fread(str_c(rpdr_file_header, "Enc", rpdr_file_ending))
+enc[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+enc[, .N, .(is.na(Admit_Date), is.na(Discharge_Date))]
+enc[, ':='(Admit_Date = as.Date(Admit_Date, format = "%m/%d/%Y"), 
+           Discharge_Date = as.Date(Discharge_Date, format = "%m/%d/%Y"))]
+
+
+## Some general data check
+
+enc[, .N, Encounter_Status]
+enc[, .N, .(Inpatient_Outpatient, Admit_Date == Discharge_Date)][order(Admit_Date, Inpatient_Outpatient)]
+enc[, summary(LOS_Days)]
+enc[, summary(Admit_Date)]
+ggplot(enc) + 
+        geom_histogram(aes(Admit_Date), bins = 200) + 
+        labs(x = "Date of encounter") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12))
+
+
+## Healthcare utilization from all years in system
+
+enc_totnum <- enc[, .N, EMPI] %>% setnames(., "N", "enc_totnum")
+enc_hlthuse <- enc[, max(Admit_Date) - min(Admit_Date), EMPI][, V1 := as.numeric(V1)/365.25] %>% 
+        setnames(., "V1", "enc_timegap_y")
+enc_hlthuse <- merge(enc_hlthuse, enc_totnum, by = "EMPI")
+enc_hlthuse[, enc_freq := enc_totnum / enc_timegap_y]
+ggplot(enc_hlthuse) + 
+        geom_histogram(aes(enc_freq), bins = 200) + 
+        labs(title = "Healthcare utilization from all years in system", 
+             x = "Frequency of encounter (number per year)", 
+             caption = "n = 1137") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+# One subject had a total of 3 encoutners on the same date
+
+```
+
+## 1.2. Filter out encounters after serum collection
+
+This will effectively exclude subjects with no serum collection date
+
+```{r}
+
+enc <- merge(enc, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+enc[, enc_timegap_d := as.numeric(Collect_Date - Admit_Date)]
+enc[, enc_timegap_y := enc_timegap_d/365.25]
+enc[, summary(enc_timegap_y)]
+
+enc_trim <- enc[Admit_Date <= Collect_Date, ]
+enc_trim[, length(unique(EMPI))]
+enc_trim[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+ggplot(enc_trim[!is.na(enc_timegap_y), max(enc_timegap_y, na.rm = T), by = EMPI]) + 
+        geom_histogram(aes(V1), bins = 200) + 
+        labs(x = "Maximum time (years) in system before serum collection for each subject", 
+             caption = "n = 1133") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+enc_trim_totnum <- enc_trim[, .N, EMPI] %>% setnames(., "N", "enc_trim_totnum")
+enc_trim_hlthuse <- enc_trim[, max(Admit_Date) - min(Admit_Date), EMPI][, V1 := as.numeric(V1)/365.25] %>% 
+        setnames(., "V1", "enc_trim_timegap_y")
+enc_trim_hlthuse <- merge(enc_trim_hlthuse, enc_trim_totnum, by = "EMPI")
+enc_trim_hlthuse[enc_trim_timegap_y >= 7/365.25, enc_trim_freq := enc_trim_totnum / enc_trim_timegap_y]
+ggplot(enc_trim_hlthuse) + 
+        geom_histogram(aes(enc_trim_freq), bins = 200) + 
+        labs(title = "Healthcare utilization - first to last encounter before serum collection", 
+             x = "Frequency of encounter (number per year)", 
+             caption = "n = 1111") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+enc_trim_hlthuse2 <- enc_trim[, max(enc_timegap_y), EMPI] %>% 
+        setnames(., "V1", "enc_trim_timetocoll_y")
+enc_trim_hlthuse <- merge(enc_trim_hlthuse, enc_trim_hlthuse2, by = "EMPI")
+enc_trim_hlthuse[enc_trim_timetocoll_y >= 7/365.25, enc_trim_freq2 := enc_trim_totnum / enc_trim_timetocoll_y]
+ggplot(enc_trim_hlthuse) + 
+        geom_histogram(aes(enc_trim_freq2), bins = 200) + 
+        labs(title = "Healthcare utilization from first encounter to serum collection", 
+             x = "Frequency of encounter (number per year)", 
+             caption = "n = 1112") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+all_subj <- merge(all_subj, enc_trim_hlthuse, by = "EMPI", all.x = T)
+rm(enc)
+
+```
+
+# 3. Health history data
+
+```{r}
+
+phy <- fread(str_c(rpdr_file_header, "Phy", rpdr_file_ending))
+phy[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+phy[, .N, is.na(Date)]
+phy[, Date := as.Date(Date, format = "%m/%d/%Y")]
+
+
+## Some general data check
+
+phy[, .N, Inpatient_Outpatient]
+phy[, summary(Date)]
+unique(phy[, .(Concept_Name, Code, Code_Type)]) %>% datatable(filter = "top")
+
+phy <- merge(phy, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+
+```
+
+## 3.1. BMI
+
+```{r}
+
+phy[grepl("BMI", Concept_Name, ignore.case = T), .(Concept_Name, Code, Code_Type)] %>% unique()
+bmi_long <- phy[grepl("BMI", Concept_Name, ignore.case = T), ]
+bmi_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+bmi_long[, .N, Units]
+bmi_long[, summary(as.numeric(Result))]
+
+bmi_long[, ':='(bmi_timegap_d = as.numeric(Collect_Date - Date), 
+                bmi = as.numeric(Result))]
+bmi_long[, ':='(bmi_timegap_y = bmi_timegap_d/365.25, 
+                bmi_timegap_d_abs = abs(bmi_timegap_d))]
+bmi_long[, summary(bmi_timegap_d)]
+bmi_long[order(-bmi)][, bmi][1:10]
+# Manual check of the top two values against other records of the same subject indicates probable data entry errors
+
+setkey(bmi_long, EMPI, bmi_timegap_d_abs)
+bmi_closest <- bmi_long[bmi < 70 & !is.na(bmi_timegap_d), ][, head(.SD, 1), EMPI]
+bmi_closest[, .N, .(bmi_timegap_d_abs <= 7, abs(bmi_timegap_y) <= 1)] %>% 
+        setnames(., c("BMI_absolute_timegap<=7d", "BMI_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(bmi_closest[bmi_timegap_d != 0, ]) + 
+        geom_histogram(aes(bmi_timegap_y), bins = 200) + 
+        labs(title = "Timing of BMI record relative to serum collection", 
+             subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1110") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+ggplot(bmi_closest) + 
+        geom_histogram(aes(bmi), bins = 100) + 
+        labs(title = "BMI closest to serum collection", 
+             x = "BMI (kg/m2)", 
+             caption = "n = 1110") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+
+bmi_closest[, ':='(bmi_date = Date, 
+                   bmi_unit = Units)]
+all_subj <- merge(all_subj, 
+                  bmi_closest[, .(EMPI, bmi, bmi_date, bmi_unit, bmi_timegap_d, bmi_timegap_y)], 
+                  by = "EMPI", all.x = T)
+
+```
+
+## 3.2. FEV1% & FEV1-pre
+
+```{r}
+
+phy[grepl("fev1", Concept_Name, ignore.case = T), .(Concept_Name, Code, Code_Type)] %>% unique()
+fev1pct_long <- phy[Code == 5703, ]
+fev1pct_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+fev1pct_long[, .N, Units]
+# datatable(fev1pct_long[, .(EMPI, Concept_Name, Result, Date, Collect_Date)])
+
+fev1pre_long <- phy[Code == 5388, ]
+fev1pre_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+fev1pre_long[, .N, Units]
+# datatable(fev1pre_long[, .(EMPI, Concept_Name, Result, Date, Collect_Date)])
+
+fev1pre_long[, unique(EMPI)] %in% fev1pct_long[, unique(EMPI)] %>% table()
+
+```
+
+## 3.3 FVC% & FVC-pre
+
+```{r}
+
+phy[grepl("fvc", Concept_Name, ignore.case = T), .(Concept_Name, Code, Code_Type)] %>% unique()
+fvcpct_long <- phy[Code == 5701, ]
+fvcpct_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+fvcpct_long[, unique(EMPI)] %in% fev1pct_long[, unique(EMPI)] %>% table()
+fvcpct_long[, .N, Units]
+# datatable(fvcpct_long[, .(EMPI, Concept_Name, Result, Date, Collect_Date)])
+
+fvcpre_long <- phy[Code == 5387, ]
+fvcpre_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+fvcpre_long[, unique(EMPI)] %in% fev1pre_long[, unique(EMPI)] %>% table()
+fvcpre_long[, .N, Units]
+# datatable(fvcpre_long[, .(EMPI, Concept_Name, Result, Date, Collect_Date)])
+
+```
+
+# 4. Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+fwrite(all_subj, file = here(dat_dir, "all_subj_enc_bmi.csv"))
+
+
+## Save long format BMI data
+
+fwrite(bmi_long, file = here(long_fmt_dir, "bmi_long.csv"))
+
+```
+
+# 5. Session info
+
+```{r}
+
+sessionInfo()
+
+```

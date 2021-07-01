@@ -1,0 +1,1140 @@
+---
+title: "PEGASUS Metabolomics - Data Analyses"
+author: "MHuang"
+date: "5/22/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "survival", "gtools", "DT")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+dat_dir <- "data/"
+res_dir <- "results/all_platforms/"
+
+
+## Filenames
+
+all_platform_data_fname <- here(dat_dir, "all_platforms_data_updated.RData")
+
+
+## Hard-coded numbers
+
+missing_thld <- 0.30
+sig_digits <- 3
+alpha_thld <- 0.05
+z_95 <- qnorm(p = 0.975)
+display_cols <- c("subgroup", "feat_id", "tentative_annotation", "med_feat", "platform", 
+                  "beta", "pval", "fdr_bh", "or", "lower95", "upper95", 
+                  "expo_linreg", "beta_linreg", "pval_linreg", "fdr_bh_linreg")
+num_cols <- c("beta", "pval", "fdr_bh", "or", "lower95", "upper95", "pct_na_met", "cv")
+
+```
+
+# 1. Load data
+
+```{r}
+
+load(all_platform_data_fname, verbose = T)
+colnames(mets_info_all)
+length(mets_list_analysis)
+
+```
+
+# 2. Regression model functions
+
+On features that passed QC with <= 30% missing
+
+```{r}
+
+clogi_res_fnc <- function(outc, mets_list, dat, mets_info, add_covar = "", 
+                          first_cols = c("feat_id", "beta", "tentative_annotation", "pval", "fdr_bh", 
+                                         "med_feat", "wo_ms2", "rt_min", "mz", "feature", "platform", "or", 
+                                         "lower95", "upper95", "totaln", "casen", "cv", "pct_na_met"), 
+                          na_thld = missing_thld) {
+        
+        clogi_mdl_tmp <- function(met) {
+                
+                fit <- eval(parse(text = str_c("clogit(", outc, " ~ ", met, " + strata(Stratum)", 
+                                               add_covar, ", data = ", dat, ")")))
+                
+                coef <- summary(fit)$coefficients
+                coef <- coef[rownames(coef) == met, ]
+
+                totaln <- summary(fit)$n
+                casen <- summary(fit)$nevent
+                
+                output <- t(c(outc, met, coef, totaln, casen)) %>% as.data.table()
+                colnames(output) <- c("outc", "feat_id", "beta", "or", "se", "zval", "pval", 
+                                      "totaln", "casen")
+                output[, (colnames(output)[-c(1:2)]) := lapply(.SD, as.numeric), .SDcols = colnames(output)[-c(1:2)]]
+                
+                return(output)
+        }
+        
+        res <- lapply(mets_list, function(x) {clogi_mdl_tmp(met = x)}) %>% rbindlist()
+        
+        eval(parse(text = str_c("mets_info <- copy(", mets_info, ")")))
+        res <- merge(res, mets_info, by = "feat_id")
+        res[pct_na_met <= na_thld, fdr_bh := p.adjust(pval, method = "BH")] 
+        res[, ':='(lower95 = exp(beta - z_95 * se), 
+                   upper95 = exp(beta + z_95 * se))] 
+        
+        setcolorder(res, first_cols)
+        res <- res[order(pval)]
+        return(res)
+}
+
+linreg_res_fnc <- function(expo, mets_list, dat, mets_info, add_covar = "", 
+                           first_cols = c("feat_id", "expo_linreg", "beta_linreg", "pval_linreg", 
+                                          "fdr_bh_linreg", "tentative_annotation", "wo_ms2", "med_feat", 
+                                          "rt_min", "mz", "feature", "platform", "cv", "pct_na_met"), 
+                           na_thld = missing_thld) {
+        
+        linear_mdl_tmp <- function(met) {
+                
+                fit <- eval(parse(text = str_c("lm(", met, " ~ ", expo, " + Age_at_Collection + race", 
+                                               add_covar, ", data = ", dat, ")")))
+                
+                coef <- summary(fit)$coefficients
+                coef <- coef[rownames(coef) == expo, ]
+
+                output <- t(c(expo, met, coef)) %>% as.data.table()
+                colnames(output) <- c("expo_linreg", "feat_id", "beta_linreg", "se_linreg", "tval_linreg", 
+                                      "pval_linreg")
+                output[, (colnames(output)[-c(1:2)]) := lapply(.SD, as.numeric), .SDcols = colnames(output)[-c(1:2)]]
+                
+                return(output)
+        }
+        
+        res <- lapply(mets_list, function(x) {linear_mdl_tmp(met = x)}) %>% rbindlist()
+        
+        eval(parse(text = str_c("mets_info <- copy(", mets_info, ")")))
+        res <- merge(res, mets_info, by = "feat_id")
+        res[pct_na_met <= na_thld, fdr_bh_linreg := p.adjust(pval_linreg, method = "BH")] 
+        
+        setcolorder(res, first_cols)
+        res <- res[order(pval_linreg)]
+        return(res)
+}
+
+```
+
+# 3. Analyses accounting for matched strata
+## 3.1. Compare excluding OCS around serum collection vs not
+### 3.1.1. NOT excluding COPD, cystic fibrosis, bronchiectasis, chronic bronchitis, a1ad, immune deficiencies
+
+```{r}
+
+res_3_1_1_1 <- clogi_res_fnc(outc = "asthma_num", 
+                             mets_list = mets_list_analysis, 
+                             dat = "pheno_mets_trim", 
+                             mets_info = "mets_info_all", 
+                             add_covar = " + bmi")
+# datatable(res_3_1_1_1[tentative_annotation != "Unknown"], filter = "top") %>% 
+#         formatSignif(columns = num_cols, digits = sig_digits)
+
+dat_tmp <- pheno_mets_trim[Stratum %in% pheno_mets_trim[ocs_ard_serum_coll == 0, Stratum], ]
+res_3_1_1_2 <- clogi_res_fnc(outc = "asthma_num", 
+                             mets_list = mets_list_analysis, 
+                             dat = "dat_tmp", 
+                             mets_info = "mets_info_all", 
+                             add_covar = " + bmi")
+# datatable(res_3_1_1_2[tentative_annotation != "Unknown"], filter = "top") %>% 
+#         formatSignif(columns = num_cols, digits = sig_digits)
+
+res_3_1_1_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_1_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_3_1_1_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_1_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+
+```
+
+### 3.1.2. Excluding COPD, cystic fibrosis, bronchiectasis, chronic bronchitis, a1ad, immune deficiencies
+
+```{r}
+
+res_3_1_2_1 <- clogi_res_fnc(outc = "asthma_num", 
+                             mets_list = mets_list_analysis, 
+                             dat = "pheno_mets_excl", 
+                             mets_info = "mets_info_all", 
+                             add_covar = " + bmi")
+# datatable(res_3_1_2_1[tentative_annotation != "Unknown"], filter = "top") %>% 
+#         formatSignif(columns = num_cols, digits = sig_digits)
+
+dat_tmp <- pheno_mets_excl[Stratum %in% pheno_mets_excl[ocs_ard_serum_coll == 0, Stratum], ]
+res_3_1_2_2 <- clogi_res_fnc(outc = "asthma_num", 
+                             mets_list = mets_list_analysis, 
+                             dat = "dat_tmp", 
+                             mets_info = "mets_info_all", 
+                             add_covar = " + bmi")
+# datatable(res_3_1_2_2[tentative_annotation != "Unknown"], filter = "top") %>% 
+#         formatSignif(columns = num_cols, digits = sig_digits)
+
+res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_2_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_3_1_2_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+
+```
+
+> Conclusion: excluding asthmatics with OCS within 10 days of serum collection made a small amount of differences 
+in the number of annotated metabolites with p<0.01; will proceed without the exclusion
+
+## 3.2. Compare excluding certain comorbidities vs not
+
+Comorbidities excluded here: COPD, cystic fibrosis, bronchiectasis, chronic bronchitis, a1ad, immune deficiencies
+
+```{r}
+
+res_3_1_1_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_1_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+
+# datatable(res_3_1_1_1[tentative_annotation != "Unknown"], filter = "top") %>%
+#         formatSignif(columns = num_cols, digits = sig_digits)
+# datatable(res_3_1_2_1[tentative_annotation != "Unknown"], filter = "top") %>%
+#         formatSignif(columns = num_cols, digits = sig_digits)
+
+```
+
+> Conclusion: will proceed with excluding these conditions (res_3_1_2_1)
+
+## 3.3. Adjusted for BMI & certain comorbities
+
+Excluding COPD, cystic fibrosis, bronchiectasis, chronic bronchitis, alpha-1-antitrypsin deficiency, and immune deficiencies
+Adjusting for pulmonary hypertension, allergic rhinitis, congestive heart failure, gerd
+
+```{r}
+
+res_3_3 <- clogi_res_fnc(outc = "asthma_num", 
+                         mets_list = mets_list_analysis, 
+                         dat = "pheno_mets_excl", 
+                         mets_info = "mets_info_all", 
+                         add_covar = " + bmi + pulhtn + arhinitis + chf + gerd")
+
+res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_3[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_3_3[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+         feature %in% res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+
+```
+
+> Conclusion: will proceed with not adjusting for pulmonary hypertension, allergic rhinitis, congestive heart failure, gerd
+
+# 4. Association with ICS # prescriptions in all asthmatics
+
+```{r}
+
+dat_tmp <- pheno_mets_excl[asthma_num == 1, ]
+ggplot(dat_tmp) + geom_histogram(aes(ics_trim_totnum_1y), bins = 50)
+# dat_tmp[, ics_trim_totnum_1y_ind := case_when(ics_trim_totnum_1y == 0 ~ 0, 
+#                                               ics_trim_totnum_1y > 1 ~ 1)]
+res_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                          mets_list = mets_list_analysis, 
+                          dat = "dat_tmp", 
+                          mets_info = "mets_info_all", 
+                          add_covar = " + Gender + bmi")
+
+res_overall <- merge(res_3_1_2_1, 
+                     res_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                     by = "feat_id")
+res_overall <- res_overall[order(pval)][, subgroup := "overall"] %>% setcolorder(., "subgroup")
+
+datatable(res_overall[tentative_annotation != "Unknown", ..display_cols], filter = "top") %>% 
+        formatSignif(columns = c("beta", "pval", "fdr_bh", "or", "lower95", "upper95", 
+                                 "beta_linreg", "pval_linreg", "fdr_bh_linreg"), digits = sig_digits)
+
+
+## Save results
+
+saveRDS(res_overall, file = here(res_dir, "res_overall.rds"))
+
+```
+
+# 5. Subgroup analyses
+## 5.1. Subgroup by gender
+### 5.1.1. Female
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Gender == "F", ]
+res_5_1_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_1_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_1_1 <- res_5_1_1[, subgroup := "female"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[Gender == "F" & asthma_num == 1, ]
+res_5_1_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + bmi")
+res_female <- merge(res_5_1_1, 
+                    res_5_1_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                    by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_female, file = here(res_dir, "res_female.rds"))
+
+```
+
+### 5.1.2. Male
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Gender == 'M', ]
+res_5_1_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_1_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_3_1_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_1_2 <- res_5_1_2[, subgroup := "male"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[Gender == "M" & asthma_num == 1, ]
+res_5_1_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + bmi")
+res_male <- merge(res_5_1_2, 
+                  res_5_1_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                  by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_male, file = here(res_dir, "res_male.rds"))
+
+```
+
+## 5.2. Subgroup by ICS use in 1 year before collection
+### 5.2.1. ICS # prescription > 0
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & ics_trim_totnum_1y > 0, Stratum], ]
+res_5_2_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_2_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_2_1 <- res_5_2_1[, subgroup := "ics_1y_prior_yes"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[ics_trim_totnum_1y > 0 & asthma_num == 1, ]
+res_5_2_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_ics_1y_y <- merge(res_5_2_1, 
+                      res_5_2_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_ics_1y_y, file = here(res_dir, "res_ics_1y_y.rds"))
+
+```
+
+### 5.2.2. ICS # prescription == 0
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & ics_trim_totnum_1y == 0, Stratum], ]
+res_5_2_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_2_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_2_2 <- res_5_2_2[, subgroup := "ics_1y_prior_no"] %>% setcolorder(., "subgroup")
+
+
+## Save results
+
+res_ics_1y_n <- res_5_2_2[, ':='(expo_linreg = NA, beta_linreg = NA, pval_linreg = NA, fdr_bh_linreg = NA)]
+saveRDS(res_ics_1y_n, file = here(res_dir, "res_ics_1y_n.rds"))
+
+```
+
+## 5.3. Subgroup by eosinophil count
+### 5.3.1. EOS >= 0.3 K/uL
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & eos >= 0.3, Stratum], ]
+res_5_3_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_3_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_3_1 <- res_5_3_1[, subgroup := "eos_high_300"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & eos >= 0.3, ]
+res_5_3_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_eos_high <- merge(res_5_3_1, 
+                      res_5_3_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_eos_high, file = here(res_dir, "res_eos_high.rds"))
+
+```
+
+### 5.3.2. EOS < 0.3 K/uL
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & eos < 0.3, Stratum], ]
+res_5_3_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_3_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_3_2 <- res_5_3_2[, subgroup := "eos_low_300"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & eos < 0.3, ]
+res_5_3_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_eos_low <- merge(res_5_3_2, 
+                     res_5_3_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                     by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_eos_low, file = here(res_dir, "res_eos_low.rds"))
+
+```
+
+## 5.4. Subgroup by asthma exacerbation == 0 in 1 year before collection
+### 5.4.1. Exacerbation count > 0
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & 
+                                                                 asthma_exacerbation_trim_totnum_1y > 0, Stratum], ]
+res_5_4_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_4_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_4_1 <- res_5_4_1[, subgroup := "exacerbation_1y_prior_yes"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & asthma_exacerbation_trim_totnum_1y > 0, ]
+res_5_4_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_exac_1y_y <- merge(res_5_4_1, 
+                       res_5_4_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                       by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_exac_1y_y, file = here(res_dir, "res_exac_1y_y.rds"))
+
+```
+
+### 5.4.2. Exacerbation count == 0
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & 
+                                                           asthma_exacerbation_trim_totnum_1y == 0, Stratum], ]
+res_5_4_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_4_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_4_2 <- res_5_4_2[, subgroup := "exacerbation_1y_prior_no"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & asthma_exacerbation_trim_totnum_1y == 0, ]
+res_5_4_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_exac_1y_n <- merge(res_5_4_2, 
+                       res_5_4_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                       by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_exac_1y_n, file = here(res_dir, "res_exac_1y_n.rds"))
+
+```
+
+## 5.5. Subgroup by obesity
+### 5.5.1. BMI >= 30
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & bmi >= 30, Stratum], ]
+res_5_5_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_5_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_5_1 <- res_5_5_1[, subgroup := "bmi_high_30"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & bmi >= 30, ]
+res_5_5_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_bmi_high <- merge(res_5_5_1, 
+                      res_5_5_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_bmi_high, file = here(res_dir, "res_bmi_high.rds"))
+
+```
+
+### 5.5.2. BMI < 30
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & bmi < 30, Stratum], ]
+res_5_5_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_5_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_5_2 <- res_5_5_2[, subgroup := "bmi_low_30"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & bmi < 30, ]
+res_5_5_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_bmi_low <- merge(res_5_5_2, 
+                     res_5_5_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                     by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_bmi_low, file = here(res_dir, "res_bmi_low.rds"))
+
+```
+
+## 5.6. Subgroup by OCS use in 1 year before collection
+### 5.6.1. OCS # prescription > 0
+
+```{r, eval = F}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & ocs_trim_totnum_1y > 0, Stratum], ]
+res_5_6_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_6_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_6_1 <- res_5_6_1[, subgroup := "ocs_1y_prior_yes"] %>% setcolorder(., "subgroup")
+
+
+## Association with ics # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[ocs_trim_totnum_1y > 0 & asthma_num == 1, ]
+res_5_6_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_ocs_1y_y <- merge(res_5_6_1, 
+                      res_5_6_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_ocs_1y_y, file = here(res_dir, "res_ocs_1y_y.rds"))
+
+```
+
+### 5.6.2. OCS # prescription == 0
+
+```{r, eval = F}
+
+## Asthmatocs vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & ocs_trim_totnum_1y == 0, Stratum], ]
+res_5_6_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_6_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_6_2 <- res_5_6_2[, subgroup := "ocs_1y_prior_no"] %>% setcolorder(., "subgroup")
+datatable(res_5_6_2[tentative_annotation != "Unknown", ], filter = "top") %>%
+        formatSignif(columns = num_cols, digits = sig_digits)
+
+
+## Association with ocs # prescription in asthmatocs
+
+dat_tmp2 <- pheno_mets_excl[ocs_trim_totnum_1y == 0 & asthma_num == 1, ]
+res_5_6_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_ocs_1y_n <- merge(res_5_6_2, 
+                      res_5_6_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_ocs_1y_n, file = here(res_dir, "res_ocs_1y_n.rds"))
+
+```
+
+## 5.7. Subgroup by IgE/allergy status
+### 5.7.1. High total/specific IgE or environmental allergy
+
+```{r}
+
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & allergy_ever == 1, Stratum], ]
+res_5_7_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_7_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_7_1 <- res_5_7_1[, subgroup := "ige_high_env_allergy"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & allergy_ever == 1, ]
+res_5_7_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_ige_high <- merge(res_5_7_1, 
+                      res_5_7_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_ige_high, file = here(res_dir, "res_allergy_y.rds"))
+
+```
+
+### 5.7.2. Normal total/specific IgE and no environmental allergy
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & allergy_ever == 0, Stratum], ]
+res_5_7_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_7_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_7_2 <- res_5_7_2[, subgroup := "ige_norm_no_env_allergy"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & allergy_ever == 0, ]
+res_5_7_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_ige_norm <- merge(res_5_7_2, 
+                      res_5_7_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_ige_norm, file = here(res_dir, "res_allergy_n.rds"))
+
+```
+
+## 5.8. Subgroup by neutrophil
+### 5.8.1. NEUT >= median
+
+```{r}
+
+neut_median <- median(pheno_mets_excl$neut, na.rm = T)
+neut_median
+
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & neut >= neut_median, Stratum], ]
+res_5_8_1 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_8_1[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_8_1 <- res_5_8_1[, subgroup := "neut_high_median"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & neut >= neut_median, ]
+res_5_8_1_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_neut_high <- merge(res_5_8_1, 
+                      res_5_8_1_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                      by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_neut_high, file = here(res_dir, "res_neut_high.rds"))
+
+```
+
+### 5.8.2. NEUT < median
+
+```{r}
+
+## Asthmatics vs controls
+
+dat_tmp1 <- pheno_mets_excl[Stratum %in% pheno_mets_excl[asthma_num == 1 & neut < neut_median, Stratum], ]
+res_5_8_2 <- clogi_res_fnc(outc = "asthma_num", 
+                           mets_list = mets_list_analysis, 
+                           dat = "dat_tmp1", 
+                           mets_info = "mets_info_all", 
+                           add_covar = " + bmi")
+res_5_8_2[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+          feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_5_8_2 <- res_5_8_2[, subgroup := "neut_low_median"] %>% setcolorder(., "subgroup")
+
+
+## Association with ICS # prescription in asthmatics
+
+dat_tmp2 <- pheno_mets_excl[asthma_num == 1 & neut < neut_median, ]
+res_5_8_2_ics <- linreg_res_fnc(expo = "ics_trim_totnum_1y", 
+                                mets_list = mets_list_analysis, 
+                                dat = "dat_tmp2", 
+                                mets_info = "mets_info_all", 
+                                add_covar = " + Gender + bmi")
+res_neut_low <- merge(res_5_8_2, 
+                     res_5_8_2_ics[, .(feat_id, expo_linreg, beta_linreg, pval_linreg, fdr_bh_linreg)], 
+                     by = "feat_id")
+
+
+## Save results
+
+saveRDS(res_neut_low, file = here(res_dir, "res_neut_low.rds"))
+
+```
+
+# 6. Within asthmatics comparisons
+
+```{r}
+
+logi_res_fnc <- function(outc, mets_list, dat, mets_info, add_covar = "", 
+                         first_cols = c("feat_id", "beta", "pval", "tentative_annotation", "wo_ms2", 
+                                        "med_feat", "rt_min", "mz", "feature", "platform", "cv", "pct_na_met"), 
+                         na_thld = missing_thld) {
+        
+        logi_mdl_tmp <- function(met) {
+                
+                fit <- eval(parse(text = str_c("glm(", outc, " ~ ", met, " + Age + race", 
+                                               add_covar, ", data = ", dat, ", family = 'binomial')")))
+                
+                coef <- summary(fit)$coefficients
+                coef <- coef[rownames(coef) == met, ]
+                
+                output <- t(c(outc, met, coef)) %>% as.data.table()
+                colnames(output) <- c("outc", "feat_id", "beta", "se", "zval", "pval")
+                output[, (colnames(output)[-c(1:2)]) := lapply(.SD, as.numeric), .SDcols = colnames(output)[-c(1:2)]]
+                
+                return(output)
+        }
+        
+        res <- lapply(mets_list, function(x) {logi_mdl_tmp(met = x)}) %>% rbindlist()
+        
+        eval(parse(text = str_c("mets_info <- copy(", mets_info, ")")))
+        res <- merge(res, mets_info, by = "feat_id")
+        res[pct_na_met <= na_thld, fdr_bh := p.adjust(pval, method = "BH")] 
+        res[, ':='(or = exp(beta), 
+                   lower95 = exp(beta - z_95 * se), 
+                   upper95 = exp(beta + z_95 * se))] 
+        
+        setcolorder(res, first_cols)
+        res <- res[order(pval)]
+        return(res)
+}
+
+linear_res_fnc <- function(expo, mets_list, dat, mets_info, add_covar = "", 
+                           first_cols = c("feat_id", "expo", "beta", "pval", "tentative_annotation", 
+                                          "wo_ms2", "med_feat", "rt_min", "mz", "feature", "platform", 
+                                          "cv", "pct_na_met"), 
+                           na_thld = missing_thld) {
+        
+        linear_mdl_tmp <- function(met) {
+                
+                fit <- eval(parse(text = str_c("lm(", met, " ~ ", expo, " + Age + race", 
+                                               add_covar, ", data = ", dat, ")")))
+                
+                coef <- summary(fit)$coefficients
+                coef <- coef[rownames(coef) == expo, ]
+
+                output <- t(c(expo, met, coef)) %>% as.data.table()
+                colnames(output) <- c("expo", "feat_id", "beta", "se", "tval", "pval")
+                output[, (colnames(output)[-c(1:2)]) := lapply(.SD, as.numeric), .SDcols = colnames(output)[-c(1:2)]]
+                
+                return(output)
+        }
+        
+        res <- lapply(mets_list, function(x) {linear_mdl_tmp(met = x)}) %>% rbindlist()
+        
+        eval(parse(text = str_c("mets_info <- copy(", mets_info, ")")))
+        res <- merge(res, mets_info, by = "feat_id")
+        res[pct_na_met <= na_thld, fdr_bh := p.adjust(pval, method = "BH")] 
+
+        setcolorder(res, first_cols)
+        res <- res[order(pval)]
+        return(res)
+}
+
+pheno_mets_excl[asthma_num == 1, eos_high := case_when(eos >= 0.3 ~ 1, 
+                                                       eos < 0.3 ~ 0)]
+pheno_mets_excl[asthma_num == 1, obese := case_when(bmi >= 30 ~ 1, 
+                                                    bmi < 30 ~ 0)]
+pheno_mets_excl[, female := case_when(Gender == "F" ~ 1, 
+                                      Gender == "M" ~ 0)]
+pheno_mets_excl_asthma <- pheno_mets_excl[asthma_num == 1, ]
+
+```
+
+## 6.1. High vs low eosinophilic
+
+```{r}
+
+pheno_mets_excl_asthma[, .N, eos_high]
+res_high_vs_low_eos <- logi_res_fnc(outc = "eos_high", 
+                                    mets_list = mets_list_analysis, 
+                                    dat = "pheno_mets_excl_asthma", 
+                                    mets_info = "mets_info_all", 
+                                    add_covar = " + Gender + bmi")
+
+res_high_vs_low_eos[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+                    feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_high_vs_low_eos <- res_high_vs_low_eos[, comparison := "high_vs_low_eos_asthmatics"] %>% 
+        setcolorder(., "comparison")
+
+```
+
+## 6.2. Obese vs not
+
+```{r}
+
+pheno_mets_excl_asthma[, .N, obese]
+res_obese_vs_not <- logi_res_fnc(outc = "obese", 
+                                 mets_list = mets_list_analysis, 
+                                 dat = "pheno_mets_excl_asthma", 
+                                 mets_info = "mets_info_all", 
+                                 add_covar = " + Gender")
+
+res_obese_vs_not[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+                 feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_obese_vs_not <- res_obese_vs_not[, comparison := "obese_vs_not_asthmatics"] %>% 
+        setcolorder(., "comparison")
+
+res_compare_asthmatics <- rbind(res_high_vs_low_eos, res_obese_vs_not)
+
+```
+
+## 6.3. high IgE/environmental allergy vs not
+
+```{r}
+
+pheno_mets_excl_asthma[, .N, allergy_ever]
+res_allergy_vs_not <- logi_res_fnc(outc = "allergy_ever", 
+                               mets_list = mets_list_analysis, 
+                               dat = "pheno_mets_excl_asthma", 
+                               mets_info = "mets_info_all", 
+                               add_covar = " + Gender + bmi")
+
+res_allergy_vs_not[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+                   feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_allergy_vs_not <- res_allergy_vs_not[, comparison := "allergy_vs_not_asthmatics"] %>% 
+        setcolorder(., "comparison")
+
+res_compare_asthmatics <- rbind(res_compare_asthmatics, res_allergy_vs_not)
+
+```
+
+## 6.4. Female vs male
+
+```{r}
+
+pheno_mets_excl_asthma[, .N, female]
+res_female_vs_male <- logi_res_fnc(outc = "female", 
+                                   mets_list = mets_list_analysis, 
+                                   dat = "pheno_mets_excl_asthma", 
+                                   mets_info = "mets_info_all", 
+                                   add_covar = " + bmi")
+
+res_female_vs_male[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+                   feature %in% res_overall[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_female_vs_male <- res_female_vs_male[, comparison := "female_vs_male_asthmatics"] %>% 
+        setcolorder(., "comparison")
+
+
+## In control subjects only 
+
+pheno_mets_ctrl <- pheno_mets_excl[asthma_num == 0, ]
+
+res_female_vs_male_ctrl <- logi_res_fnc(outc = "female", 
+                                        mets_list = mets_list_analysis, 
+                                        dat = "pheno_mets_ctrl", 
+                                        mets_info = "mets_info_all", 
+                                        add_covar = " + bmi")
+
+res_female_vs_male_ctrl[tentative_annotation != "Unknown" & pval < alpha_thld/5, .N, 
+                        feature %in% res_female_vs_male[tentative_annotation != "Unknown" & pval < alpha_thld/5, feature]]
+res_female_vs_male_ctrl <- res_female_vs_male_ctrl[, comparison := "female_vs_male_controls"] %>% 
+        setcolorder(., "comparison")
+
+res_compare_asthmatics <- rbind(res_compare_asthmatics, res_female_vs_male)
+res_compare_asthmatics <- rbind(res_compare_asthmatics, res_female_vs_male_ctrl)
+
+
+## Save results
+
+saveRDS(res_compare_asthmatics, file = here(res_dir, "res_compare_dif_asthmatics.rds"))
+
+```
+
+## 6.5. Continuous eosinophil
+
+```{r}
+
+pheno_mets_excl_asthma[, summary(eos)]
+ggplot(pheno_mets_excl_asthma) + geom_histogram(aes(eos), bins = 100)
+res_eos_expo_cont <- linear_res_fnc(expo = "eos", 
+                                    mets_list = mets_list_analysis, 
+                                    dat = "pheno_mets_excl_asthma", 
+                                    mets_info = "mets_info_all", 
+                                    add_covar = " + Gender + bmi")
+res_eos_expo_cont <- res_eos_expo_cont[, comparison := "eos_continous"] %>% 
+        setcolorder(., "comparison")
+
+```
+
+## 6.6. Continuous fev1
+
+```{r}
+
+pheno_mets_excl_asthma[, summary(fev1_prebd_pctpred)]
+ggplot(pheno_mets_excl_asthma) + geom_histogram(aes(fev1_prebd_pctpred), bins = 100)
+res_fev1_expo_cont <- linear_res_fnc(expo = "fev1_prebd_pctpred", 
+                                     mets_list = mets_list_analysis, 
+                                     dat = "pheno_mets_excl_asthma", 
+                                     mets_info = "mets_info_all", 
+                                     add_covar = " + Gender + bmi")
+res_fev1_expo_cont <- res_fev1_expo_cont[, comparison := "fev1_continous"] %>% 
+        setcolorder(., "comparison")
+
+res_qt_asthmatics <- rbind(res_eos_expo_cont, res_fev1_expo_cont)
+
+```
+
+## 6.7. Continuous fvc
+
+```{r}
+
+pheno_mets_excl_asthma[, summary(fvc_prebd_pctpred)]
+ggplot(pheno_mets_excl_asthma) + geom_histogram(aes(fvc_prebd_pctpred), bins = 100)
+res_fvc_expo_cont <- linear_res_fnc(expo = "fvc_prebd_pctpred", 
+                                    mets_list = mets_list_analysis, 
+                                    dat = "pheno_mets_excl_asthma", 
+                                    mets_info = "mets_info_all", 
+                                    add_covar = " + Gender + bmi")
+res_fvc_expo_cont <- res_fvc_expo_cont[, comparison := "fvc_continous"] %>% 
+        setcolorder(., "comparison")
+
+res_qt_asthmatics <- rbind(res_qt_asthmatics, res_fvc_expo_cont)
+
+```
+
+## 6.8. Continuous fev1/fvc
+
+```{r}
+
+pheno_mets_excl_asthma[, summary(fev1fvc_prebd_pctpred)]
+ggplot(pheno_mets_excl_asthma) + geom_histogram(aes(fev1fvc_prebd_pctpred), bins = 100)
+res_fev1fvc_expo_cont <- linear_res_fnc(expo = "fev1fvc_prebd_pctpred", 
+                                        mets_list = mets_list_analysis, 
+                                        dat = "pheno_mets_excl_asthma", 
+                                        mets_info = "mets_info_all", 
+                                        add_covar = " + Gender + bmi")
+res_fev1fvc_expo_cont <- res_fev1fvc_expo_cont[, comparison := "fev1fvc_continous"] %>% 
+        setcolorder(., "comparison")
+
+res_qt_asthmatics <- rbind(res_qt_asthmatics, res_fev1fvc_expo_cont)
+
+```
+
+## 6.9. Continuous neutrophil
+
+```{r}
+
+pheno_mets_excl_asthma[, summary(neut)]
+ggplot(pheno_mets_excl_asthma) + geom_histogram(aes(neut), bins = 100)
+res_neut_expo_cont <- linear_res_fnc(expo = "neut", 
+                                     mets_list = mets_list_analysis, 
+                                     dat = "pheno_mets_excl_asthma", 
+                                     mets_info = "mets_info_all", 
+                                     add_covar = " + Gender + bmi")
+res_neut_expo_cont <- res_neut_expo_cont[, comparison := "neut_continous"] %>% 
+        setcolorder(., "comparison")
+
+res_qt_asthmatics <- rbind(res_qt_asthmatics, res_neut_expo_cont)
+
+
+## Save results
+
+saveRDS(res_qt_asthmatics, file = here(res_dir, "res_qt_asthmatics.rds"))
+
+```
+
+# Session info
+
+```{r}
+
+timestamp()
+sessionInfo()
+
+```

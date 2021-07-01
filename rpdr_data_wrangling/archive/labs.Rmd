@@ -1,0 +1,247 @@
+---
+title: "PEGASUS Labs"
+author: "MHuang"
+date: "10/2/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+pegasus_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/PEGASUS/"
+dat_dir <- "data/"
+
+
+## Filenames
+
+rpdr_file_header <- str_c(pegasus_dir, "rpdr_data/rpdr_pull_082020/mns43_083120164337973193_")
+rpdr_file_ending <- ".txt" 
+all_subj_fname <- here(dat_dir, "all_subj_enc_bmi.csv")
+
+```
+
+# 1. Laboratory tests data
+## 1.1. Read in data & parse out different labs
+
+```{r}
+
+all_subj <- fread(all_subj_fname)
+all_subj[, Collect_Date := as.Date(Collect_Date, format = "%Y-%m-%d")]
+all_subj[, .N, .(is.na(EMPI), is.na(Collect_Date))][order(is.na, is.na.1)] %>% 
+        setnames(., c("missing_EMPI", "missing_Collect_Date", "N")) %>% print()
+
+lab <- fread(str_c(rpdr_file_header, "Lab", rpdr_file_ending), quote = "")
+lab[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+lab[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+lab[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+lab[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                    Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+
+lab <- merge(lab, all_subj[, .(EMPI, Collect_Date)], by = "EMPI", all.x = T)
+lab[, lab_timegap_d := as.numeric(Collect_Date - Lab_Date)]
+lab[, lab_timegap_y := lab_timegap_d/365.25]
+lab[, summary(lab_timegap_y)]
+
+lab_condensed <- unique(lab[, .(Group_Id, Loinc_Code, Test_Id, Test_Description, Specimen_Type)])
+
+lab_condensed[grep("eos", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("eos", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+eos_code <- unique(lab_condensed[grep("eos", Group_Id, ignore.case = T), Loinc_Code])
+
+lab_condensed[grep("vitamin d", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("vitamin d", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+vitd_25oh_code <- unique(lab_condensed[Group_Id == "25 (OH)Vitamin D Total", Loinc_Code])
+vitd_25ohd3_code <- unique(lab_condensed[Group_Id == "25 (OH) Vitamin D3", Loinc_Code])
+vitd_25ohd2_code <- unique(lab_condensed[Group_Id == "25 (OH) Vitamin D2", Loinc_Code])
+vitd_125oh_code <- unique(lab_condensed[Group_Id == "1,25 (OH) 2 Vitamin D", Loinc_Code])
+vitd_125ohd2_code <- unique(lab_condensed[Group_Id == "1,25 (OH) 2 Vitamin D2", Loinc_Code])
+
+lab_condensed[grep("ige", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("ige", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+ige_code <- unique(lab_condensed[Group_Id == "IgE", Loinc_Code])
+
+lab_condensed[grep("igg", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("igg", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+igg_code <- unique(lab_condensed[Group_Id == "IgG", Loinc_Code])
+
+lab_condensed[grep("ACTH", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("ACTH", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+acth_code <- unique(lab_condensed[Group_Id == "ACTH (Corticotropin)", Loinc_Code])
+
+lab_condensed[grep("cortisol", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("cortisol", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+cortisol_code <- unique(lab_condensed[Group_Id == "Cortisol", Loinc_Code])
+cortisol_am_code <- unique(lab_condensed[Group_Id == "Cortisol (AM specimen)", Loinc_Code])
+cortisol_pm_code <- unique(lab_condensed[Group_Id == "Cortisol, PM specimen", Loinc_Code])
+cortisol_urine_code <- unique(lab_condensed[Group_Id == "Cortisol, Free (timed urine)", Loinc_Code])
+cortisol_postacth_code <- unique(lab_condensed[Group_Id == "Cortisol (1hr post ACTH)", Loinc_Code])
+
+lab_condensed[grep("dhea", Group_Id, ignore.case = T), ] %>% datatable()
+lab_condensed[grep("dhea", Group_Id, ignore.case = T), ][, .N, .(Group_Id, Loinc_Code)]
+dhea_code <- unique(lab_condensed[Group_Id == "DHEA (ng/mL)", Loinc_Code])
+dheas_code <- unique(lab_condensed[Group_Id %in% c("DHEAS (ug/dL)", "DHEAS (ug/mL)"), Loinc_Code])
+
+```
+
+## 1.2. Filter out labs after serum collection
+
+This will effectively exclude subjects with no serum collection date
+
+```{r}
+
+lab_trim <- lab[Lab_Date <= Collect_Date, ]
+lab_trim[, length(unique(EMPI))] 
+lab_trim[, unique(EMPI)] %in% all_subj[SampleGroup == "Asthmatic", EMPI] %>% table()
+
+```
+
+# 2. Eosinophil counts
+
+```{r}
+
+eos_long <- lab[grep("eos", Group_Id, ignore.case = T), ]
+eos_long[, unique(EMPI)] %in% all_subj[, EMPI] %>% table()
+eos_long[, .N, .(Group_Id, Test_Description, Test_Id)][order(Group_Id, Test_Description)] %>% datatable()
+
+
+## Clean up eos counts data (test results & unit, missingness etc.)
+
+eos_long[, ':='(eos_timegap_d = as.numeric(Collect_Date - Lab_Date), 
+                eos = as.numeric(Result), 
+                eos_date = Lab_Date)]
+eos_long[is.na(eos), .N, Result] %>% datatable()
+eos_long[grep("/", Result), ':='(eos = gsub("([0-9]+)/(.*)", "\\1", Result) %>% as.numeric(), 
+                                 Reference_Units = gsub("([0-9]+)/(.*)", "/\\2", Result))]
+
+eos_long[, .N, Reference_Units] %>% datatable()
+eos_long[Reference_Units == "", .N, .(Result, eos)] %>% datatable()
+eos_long[!is.na(eos), .N, .(eos < 5, Reference_Units)][order(eos, Reference_Units)] %>% datatable()
+# eos_long[eos >= 5, ] %>% datatable()
+eos_long[eos >= 5 & grepl("^[K|th]", Reference_Units) & Abnormal_Flag == "", 
+         .(EMPI, Group_Id, Test_Description, Result, Abnormal_Flag, Reference_Units, Reference_Range, eos)]
+eos_long[eos >= 5 & grepl("^[K|th]", Reference_Units) & Abnormal_Flag == "", 
+         eos := eos/1000]
+eos_long[eos >= 5 & Reference_Units %in% c("/CMM", "/CUMM", "/cumm", "UL"), eos := eos/1000]
+eos_long[!is.na(eos), eos_unit := "K/uL"]
+
+eos_long <- eos_long[!is.na(eos) & !is.na(Collect_Date), ]
+
+```
+
+## 2.1. Extract last Eos record before serum collection
+
+```{r}
+
+eos_long[, summary(eos_timegap_d)]
+eos_long[, ':='(eos_timegap_y = eos_timegap_d/365.25, 
+                eos_timegap_d_abs = abs(eos_timegap_d))]
+eos_long[, summary(eos_timegap_y)]
+
+setkey(eos_long, EMPI, eos_timegap_d)
+eos_lastbf <- eos_long[eos_timegap_d >= 0, ][, head(.SD, 1), EMPI]
+eos_lastbf[, .N, .(eos_timegap_d <= 7, eos_timegap_y <= 1)] %>% 
+        setnames(., c("eos_timegap<=7d_before", "eos_timegap<=1y_before", "N")) %>%
+        print()
+ggplot(eos_lastbf) + 
+        geom_histogram(aes(eos_timegap_y), bins = 200) + 
+        labs(title = "Timing of eosinophil record before/on serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 951") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(eos_lastbf) +
+        geom_histogram(aes(eos), bins = 200) +
+        labs(title = "Eosinophil count last before/on serum collection",
+             x = "Eos (K/uL)",
+             caption = "n = 951") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+## 2.2. Extract last Eos record closest to serum collection
+
+```{r}
+
+setkey(eos_long, EMPI, eos_timegap_d_abs)
+eos_closest <- eos_long[, head(.SD, 1), EMPI]
+eos_closest[, .N, .(eos_timegap_d_abs <= 7, abs(eos_timegap_y) <= 1)] %>% 
+        setnames(., c("eos_absolute_timegap<=7d", "eos_absolute_timegap<=1y", "N")) %>%
+        print()
+ggplot(eos_closest) + 
+        geom_histogram(aes(eos_timegap_y), bins = 200) + 
+        labs(title = "Timing of eosinophil record closest to serum collection", 
+             # subtitle = "Time gap = 0 removed", 
+             x = "Time gap in years", 
+             caption = "n = 1045") + 
+        theme_minimal() + 
+        theme(axis.title = element_text(size = 12), 
+              axis.text = element_text(size = 12), 
+              plot.caption = element_text(size = 12))
+ggplot(eos_closest) +
+        geom_histogram(aes(eos), bins = 200) +
+        labs(title = "Eosinophil count last closest to serum collection",
+             x = "Eos (K/uL)",
+             caption = "n = 1045") +
+        theme_minimal() +
+        theme(axis.title = element_text(size = 12),
+              axis.text = element_text(size = 12),
+              plot.caption = element_text(size = 12))
+
+```
+
+# Save data
+
+```{r}
+
+# Save data table with aggregated info & one row per subject
+
+fwrite(eos_lastbf[, .(EMPI, eos, eos_date, eos_unit, eos_timegap_d, eos_timegap_y, Group_Id, 
+                      Test_Description, Reference_Range, Abnormal_Flag)], 
+       file = here(dat_dir, "eosinophil_last_before_serum_collection.csv"))
+fwrite(eos_closest[, .(EMPI, eos, eos_date, eos_unit, eos_timegap_d, eos_timegap_y, Group_Id, 
+                       Test_Description, Reference_Range, Abnormal_Flag)], 
+       file = here(dat_dir, "eosinophil_closest_to_serum_collection.csv"))
+
+
+## Save long format data
+
+fwrite(eos_long, file = here(dat_dir, "eosinophil_long.csv"))
+
+```
+
+# Session info
+
+```{r}
+
+sessionInfo()
+
+```

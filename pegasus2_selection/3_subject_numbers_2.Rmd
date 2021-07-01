@@ -1,0 +1,984 @@
+---
+title: "Choosing MGB Biobank asthmatic subject/sample numbers for further omics study"
+subtitle: "Diagnosis, BMI, smoking, lab tests"
+author: "MHuang"
+date: "2/8/2021"
+output:   
+  html_document: 
+    toc: yes
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+
+## Packages
+
+pkg <- c("tidyverse", "data.table", "here", "DT", "grid", "gridExtra")
+for (p in pkg) {
+        if (require(p, character.only = T)) {
+                print(paste0(p, " loaded successfully"))
+        } else {
+                install.packages(p)
+                require(p, character.only = T)
+                print(paste0(p, " downloaded and loaded successfully"))
+        }
+}
+
+
+## Paths
+
+asthma_rpdr_dir <- "C:/Users/MHuang/Dropbox (Partners HealthCare)/Asthma/RPDR_Downloads/2020-06-30/"
+
+dat_dir <- "data/"
+fig_dir <- "figures/"
+res_dir <- "results/"
+
+
+## File names
+
+pool_fname <- here(res_dir, "selection_pool.csv")
+rpdr_file_header <- str_c(asthma_rpdr_dir, "mns43_063020114847776198_")
+rpdr_file_ending <- ".txt"
+
+
+## Hard-coded numbers 
+
+sig_digits <- 3
+
+```
+
+# 1. Subject selection pool & diagnosis data
+
+```{r}
+
+pool <- fread(pool_fname); nrow(pool)
+pool[, last_plasma_date := as.Date(last_plasma_date, format = "%Y-%m-%d")]
+
+dia <- fread(str_c(rpdr_file_header, "Dia", rpdr_file_ending), quote = "")
+dia[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+dia <- dia[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+dia[, Date := as.Date(Date, format = "%m/%d/%Y")]
+dia[, summary(Date)]
+
+dia <- merge(dia, pool[, .(EMPI, last_plasma_date)], by = "EMPI", all.x = T)
+dia[, dia_timegap_d := as.numeric(Date - last_plasma_date)][, dia_timegap_y := dia_timegap_d/365.25]
+dia[, summary(dia_timegap_y)]
+
+dia_condensed <- unique(dia[, .(Diagnosis_Name, Code_Type, Code)])
+
+```
+
+# 2. Asthma exacerbations & severity, adrenal insufficiency
+
+Variable names:  
+
+ - n_exac_dia: number of asthma exacerbation diagnoses    
+ - has_exac_dia: has asthma exacerbation diagnoses    
+ - n_sevr_dia: number of asthma severity diagnoses  
+ - has_sevr_dia: has asthma severity diagnoses  
+ - n_adrinsuf_dia: number of adrenal insufficiency diagnoses  
+ - has_adrinsuf_dia: has drenal insufficiency diagnoses  
+
+Suffix:  
+
+ - _1ybflastpl: within 1 year prior to last plasma date  
+ - _2ybflastpl: within 2 years prior to last plasma date  
+ - _3ybflastpl: within 3 years prior to last plasma date  
+ - _4ybflastpl: within 4 years prior to last plasma date  
+ - _5ybflastpl: within 5 years prior to last plasma date  
+
+## 2.1. Exacerbation counts
+
+> Status asthmaticus is a medical emergency, an extreme form of asthma exacerbation characterized by hypoxemia, hypercarbia, and secondary respiratory failure (Ref: [NCBI Book](https://www.ncbi.nlm.nih.gov/books/NBK526070/)). 
+
+```{r}
+
+dia_condensed[grep("asthma", Diagnosis_Name, ignore.case = T), 
+              ][grep("exacer|asthmaticus", Diagnosis_Name, ignore.case = T), ] %>% datatable()
+asth_exac <- dia[grep("asthma", Diagnosis_Name, ignore.case = T), 
+                 ][grep("exacer|with status asthmaticus", Diagnosis_Name, ignore.case = T), ]
+
+
+## There may be multiple records for the same person on the same day
+
+asth_exac <- unique(asth_exac[, .(EMPI, Date, Diagnosis_Name, Code_Type, Code, 
+                                  last_plasma_date, dia_timegap_d, dia_timegap_y)])
+
+```
+
+## 2.2. Severity recorded ever
+
+> Severity classification only associated with ICD10 codes
+
+```{r}
+
+dia_condensed[grep("asthma", Diagnosis_Name, ignore.case = T), ] %>% datatable()
+asth_sevr <- dia[grepl("Mild intermittent asthma|Mild persistent asthma, uncomplicated|
+                       Moderate persistent asthma|Severe persistent asthma", Diagnosis_Name), ]
+asth_sevr[, summary(Date)]
+
+
+## There may be multiple records for the same person on the same day
+
+asth_sevr <- unique(asth_sevr[, .(EMPI, Date, Diagnosis_Name, Code_Type, Code, 
+                                  last_plasma_date, dia_timegap_d, dia_timegap_y)])
+
+```
+
+## 2.3. Adrenal insufficiency diagnosis
+
+> Mineralocorticoid deficiency = hypoaldosteronism?
+> Congenital adrenogenital disorders associated with enzyme deficiency removed (3 unique subjects excluded)
+
+```{r}
+
+dia_condensed[grep("insuffic|defic", Diagnosis_Name, ignore.case = T), 
+              ][grep("adren|cortic", Diagnosis_Name, ignore.case = T), ] %>% datatable()
+adrenal_insuf <- dia[grep("insuffic|defic", Diagnosis_Name, ignore.case = T), 
+                     ][grep("adren|cortic", Diagnosis_Name, ignore.case = T), 
+                       ][!grepl("congenital", Diagnosis_Name, ignore.case = T), ]
+
+
+## There may be multiple records for the same person on the same day
+
+adrenal_insuf <- unique(adrenal_insuf[, .(EMPI, Date, Diagnosis_Name, Code_Type, Code, 
+                                          last_plasma_date, dia_timegap_d, dia_timegap_y)])
+
+
+## Remove dia object to free up memory
+
+rm(dia); gc()
+
+```
+
+## 2.4. Variables within time frame relative to last plasma date
+
+```{r}
+
+## Function to generate variables on sevrerbation diagnoses counts under certain restriction
+
+dia_vars_fnc <- function(restriction, varname_suffix) {
+        
+        ## Exacerbations
+  
+        exac_tmp <- eval(parse(text = str_c("asth_exac[", restriction, ", ]")))
+        exac_per_subj <- exac_tmp[, .(n_exac_dia = .N), EMPI]
+        setnames(exac_per_subj, c("EMPI", str_c(colnames(exac_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, exac_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, ':='(has_exac_dia", varname_suffix, " = ifelse(!is.na(n_exac_dia", 
+                                             varname_suffix, "), 1, 0) %>% as.factor())]")))
+
+        ## Severity
+  
+        sevr_tmp <- eval(parse(text = str_c("asth_sevr[", restriction, ", ]")))
+        sevr_per_subj <- sevr_tmp[, .(n_sevr_dia = .N), EMPI]
+        setnames(sevr_per_subj, c("EMPI", str_c(colnames(sevr_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, sevr_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, ':='(has_sevr_dia", varname_suffix, " = ifelse(!is.na(n_sevr_dia", 
+                                             varname_suffix, "), 1, 0) %>% as.factor())]")))
+        
+        ## Adrenal insufficiency
+  
+        adrinsuf_tmp <- eval(parse(text = str_c("adrenal_insuf[", restriction, ", ]")))
+        adrinsuf_per_subj <- adrinsuf_tmp[, .(n_adrinsuf_dia = .N), EMPI]
+        setnames(adrinsuf_per_subj, c("EMPI", str_c(colnames(adrinsuf_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, adrinsuf_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, ':='(has_adrinsuf_dia", varname_suffix, " = ifelse(!is.na(n_adrinsuf_dia", 
+                                             varname_suffix, "), 1, 0) %>% as.factor())]")))
+        
+        return(pool)
+}
+
+pool <- dia_vars_fnc(restriction = "", varname_suffix = "_alltime")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0", varname_suffix = "_bflastpl")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0 & dia_timegap_y >= -1", varname_suffix = "_1ybflastpl")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0 & dia_timegap_y >= -2", varname_suffix = "_2ybflastpl")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0 & dia_timegap_y >= -3", varname_suffix = "_3ybflastpl")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0 & dia_timegap_y >= -4", varname_suffix = "_4ybflastpl")
+pool <- dia_vars_fnc(restriction = "dia_timegap_y <= 0 & dia_timegap_y >= -5", varname_suffix = "_5ybflastpl")
+
+```
+
+### 2.4.1. Compare exacerbation data in different time frames
+
+```{r}
+
+pool[, .N, .(has_exac_dia_1ybflastpl, has_exac_dia_3ybflastpl, 
+             has_exac_dia_5ybflastpl, has_exac_dia_bflastpl, has_exac_dia_alltime)
+     ][order(has_exac_dia_1ybflastpl, has_exac_dia_3ybflastpl, 
+             has_exac_dia_5ybflastpl, has_exac_dia_bflastpl, has_exac_dia_alltime)] %>% datatable()
+
+```
+
+### 2.4.2. Compare severity availability in different time frames
+
+```{r}
+
+pool[, .N, .(has_sevr_dia_1ybflastpl, has_sevr_dia_3ybflastpl, 
+             has_sevr_dia_5ybflastpl, has_sevr_dia_bflastpl, has_sevr_dia_alltime)
+     ][order(has_sevr_dia_1ybflastpl, has_sevr_dia_3ybflastpl, 
+             has_sevr_dia_5ybflastpl, has_sevr_dia_bflastpl, has_sevr_dia_alltime)] %>% datatable()
+
+```
+
+### 2.4.3. Compare adrenal insufficiency data in different time frames
+
+```{r}
+
+pool[, .N, .(has_adrinsuf_dia_1ybflastpl, has_adrinsuf_dia_3ybflastpl, 
+             has_adrinsuf_dia_5ybflastpl, has_adrinsuf_dia_bflastpl, has_adrinsuf_dia_alltime)
+     ][order(has_adrinsuf_dia_1ybflastpl, has_adrinsuf_dia_3ybflastpl, 
+             has_adrinsuf_dia_5ybflastpl, has_adrinsuf_dia_bflastpl, has_adrinsuf_dia_alltime)] %>% datatable()
+
+```
+
+# 3. Health history data
+
+```{r}
+
+phy <- fread(str_c(rpdr_file_header, "Phy", rpdr_file_ending))
+phy[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+phy <- phy[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+
+## Some general data check
+
+phy[, .N, is.na(Date)]
+phy[, Date := as.Date(Date, format = "%m/%d/%Y")]
+phy[, summary(Date)]
+
+phy[, .N, Inpatient_Outpatient]
+
+unique(phy[, .(Concept_Name, Code, Code_Type)]) %>% datatable(filter = "top")
+
+phy <- merge(phy, pool[, .(EMPI, last_plasma_date)], by = "EMPI", all.x = T)
+
+```
+
+## 3.1. BMI
+
+Variable names:  
+
+ - bmi: BMI value of a single record  
+ - bmi_date: date of BMI record  
+ - n_bmi_rec: number of BMI records 
+ - bmi_all_values: list of all BMI values  
+ - bmi_all_dates: list of all BMI record dates  
+ - bmi_median: median BMI among all values  
+ - bmi_min: minimum BMI among all values  
+ - bmi_max: maximum BMI among all values  
+ - bmi_mean: mean BMI averaged across all values  
+
+Suffix:  
+
+ - _closest_lastpl: closest record to last plasma date  
+ - _pm1y_lastpl: plus or minus 1 year around last plasma date  
+ - _pm2y_lastpl: plus or minus 2 years around last plasma date  
+ - _pm3y_lastpl: plus or minus 3 years around last plasma date  
+
+### 3.1.1. BMI closest to last plasma date
+
+```{r}
+
+phy[grepl("BMI", Concept_Name, ignore.case = T), .(Concept_Name, Code, Code_Type)] %>% unique()
+bmi_long <- phy[grepl("BMI", Concept_Name, ignore.case = T), ]
+bmi_long[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+
+bmi_long[, .N, Units]
+bmi_long[, summary(as.numeric(Result))] # No missing
+
+bmi_long[, ':='(bmi_timegap_d = as.numeric(Date - last_plasma_date), 
+                bmi = as.numeric(Result))][, ':='(bmi_timegap_y = bmi_timegap_d/365.25, 
+                                                  bmi_timegap_d_abs = abs(bmi_timegap_d))]
+bmi_long[, summary(bmi_timegap_d)]
+bmi_long[order(-bmi)][1:100, bmi]
+bmi_long[order(bmi)][1:100, bmi]
+bmi_long <- bmi_long[bmi <= 99 & bmi >= 10, ]
+# 10 & 99 are specific cutoffs for these data; 
+# from examination of patients records over time, those >99 / <10 are likely errors
+
+setkey(bmi_long, EMPI, bmi_timegap_d_abs)
+bmi_closest <- bmi_long[, head(.SD, 1), EMPI] 
+bmi_closest[, .N, .(`BMI_absolute_timegap=0d` = bmi_timegap_d_abs == 0, 
+                    `BMI_absolute_timegap<=7d` = bmi_timegap_d_abs <= 7, 
+                    `BMI_absolute_timegap<=1y` = abs(bmi_timegap_y) <= 1)]
+
+setnames(bmi_closest, c("bmi", "Date", "Units"), str_c(c("bmi", "bmi_date", "bmi_unit"), "_closest_lastpl"))
+tmp_cols <- c("EMPI", str_c(c("bmi", "bmi_date", "bmi_unit"), "_closest_lastpl"))
+pool <- merge(pool, bmi_closest[, ..tmp_cols], by = "EMPI", all.x = T)
+pool[, has_bmi_closest_lastpl := ifelse(!is.na(bmi_closest_lastpl), 1, 0) %>% as.factor()]
+
+pool[, .N, has_bmi_closest_lastpl]
+pool[, summary(bmi_closest_lastpl)]
+pool[, summary(as.numeric(bmi_date_closest_lastpl - last_plasma_date))]
+
+```
+
+### 3.1.2. BMI within (+/-)1 year of last plasma date
+
+```{r}
+
+## Function to generate variables on BMI under certain restriction
+
+bmi_vars_fnc <- function(restriction, varname_suffix) {
+        bmi_tmp <- eval(parse(text = str_c("bmi_long[", restriction, ", ]")))
+        bmi_per_subj <- bmi_tmp[, .(n_bmi_rec = .N, 
+                                    bmi_all_values = str_c(bmi, collapse = ";"), 
+                                    bmi_all_dates = str_c(Date, collapse = ";"), 
+                                    bmi_median = median(bmi), 
+                                    bmi_min = min(bmi), 
+                                    bmi_max = max(bmi), 
+                                    bmi_mean = mean(bmi)), EMPI]
+        bmi_per_subj <- eval(parse(text = str_c("merge(bmi_per_subj, bmi_closest[", restriction, 
+                                                ", .(EMPI, bmi_timegap_d)], by = 'EMPI', all.x = T)")))
+        setnames(bmi_per_subj, "bmi_timegap_d", "bmi_closest_timegap_d")
+        setnames(bmi_per_subj, c("EMPI", str_c(colnames(bmi_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, bmi_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_bmi_rec", varname_suffix, 
+                                " := ifelse(!is.na(n_bmi_rec", varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on BMI records from within (+/-)1 year of last plasma date
+
+pool <- bmi_vars_fnc(restriction = "abs(bmi_timegap_y) <= 1", varname_suffix = "_pm1y_lastpl")
+
+
+## Check median BMI from within (+/-)1 year against BMI closest to last plasma date
+
+pool[, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm1y_lastpl)]
+pool[, summary(bmi_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = bmi_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool, aes(x = bmi_closest_lastpl, y = bmi_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+```
+
+### 3.1.3. BMI within (+/-)2 years of last plasma date
+
+```{r}
+
+## Generate variables on BMI records from within (+/-)2 years of last plasma date
+
+pool <- bmi_vars_fnc(restriction = "abs(bmi_timegap_y) <= 2", varname_suffix = "_pm2y_lastpl")
+
+
+## Check median BMI from within (+/-)2 years against BMI closest to last plasma date
+
+pool[, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm2y_lastpl)]
+pool[, summary(bmi_closest_timegap_d_pm2y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = bmi_closest_timegap_d_pm2y_lastpl), bins = 200)
+ggplot(pool, aes(x = bmi_closest_lastpl, y = bmi_median_pm2y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+```
+
+### 3.1.4. BMI within (+/-)3 years of last plasma date
+
+```{r}
+
+## Generate variables on BMI records from within (+/-)3 years of last plasma date
+
+pool <- bmi_vars_fnc(restriction = "abs(bmi_timegap_y) <= 3", varname_suffix = "_pm3y_lastpl")
+
+
+## Check median BMI from within (+/-)3 years against BMI closest to last plasma date
+
+pool[, .N, .(has_bmi_closest_lastpl, has_bmi_rec_pm3y_lastpl)]
+pool[, summary(bmi_closest_timegap_d_pm3y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = bmi_closest_timegap_d_pm3y_lastpl), bins = 200)
+ggplot(pool, aes(x = bmi_closest_lastpl, y = bmi_median_pm3y_lastpl)) + 
+        geom_point(alpha = 0.5)
+
+```
+
+## 3.2. Smoking ever
+
+```{r}
+
+phy[grepl("smok|tobac|cig", Concept_Name, ignore.case = T), .(Concept_Name, Code, Code_Type)][order(Code)] %>% unique()
+
+phy[grepl("Smoking status", Concept_Name), .N, .(Concept_Name, Result)] %>% datatable()
+phy[grepl("Cig|Chewing Tobacco", Concept_Name), .N, .(Concept_Name, Code, Result)] # Not specific to any hospital
+phy[grepl("TBCO-|QUIT-", Code), .N, .(Concept_Name, Code, Result)][order(Code)]
+
+smk <- phy[Code %in% phy[grepl("TBCO-|QUIT-", Code) | grepl("Cig|Chewing Tobacco", Concept_Name), unique(Code)], ]
+smk[, smk_ever := case_when(Code %in% c("SH-CIGS", "SH-CIGR", "SH-CHEW", "SH-SMKLSTBCO-1", "SH-SMKLSTBCO-2", 
+                                        "SH-SMKTBCO-1", "SH-SMKTBCO-2", "SH-SMKTBCO-4", "SH-SMKTBCO-9", 
+                                        "SH-SMKTBCO-10", "SH-TBCO-1", "SH-TBCO-4", "SMK2QUIT-1", "SMK2QUIT-2") ~ 1, 
+                            Code %in% c("SH-SMKLSTBCO-3", "SH-SMKTBCO-5", "SH-SMKTBCO-7", "SH-TBCO-2") ~ 0)]
+smk_per_subj <- smk[!is.na(smk_ever), .(smk_ever_alltime = ifelse(sum(smk_ever) > 0, 1, 0)), EMPI]
+pool <- merge(pool, smk_per_subj, by = "EMPI", all.x = T)
+pool[, .N, smk_ever_alltime]
+
+
+## Remove phy object to free up memory
+
+rm(phy); gc()
+
+```
+
+# 4. Lab test data
+
+ - ACTH  
+ - Cortisol  
+ - Eosinophil  
+ - Total IgE  
+
+```{r}
+
+lab <- fread(str_c(rpdr_file_header, "Lab", rpdr_file_ending), quote = "")
+lab[, unique(EMPI)] %in% pool[, EMPI] %>% table()
+lab <- lab[EMPI %in% pool$EMPI, ] # Restrict to subjects in selection pool
+
+lab[, Lab_Date := as.Date(substr(Seq_Date_Time, 1, 10), format = "%m/%d/%Y")]
+lab[grepl(":", Seq_Date_Time), ':='(Lab_Hour = gsub("(.*) (.*):(.*)", "\\2", Seq_Date_Time), 
+                                    Lab_Minute = gsub("(.*) (.*):(.*)", "\\3", Seq_Date_Time))]
+lab[, summary(Lab_Date)]
+
+lab <- merge(lab, pool[, .(EMPI, last_plasma_date)], by = "EMPI", all.x = T)
+lab[, lab_timegap_d := as.numeric(Lab_Date - last_plasma_date)][, lab_timegap_y := lab_timegap_d/365.25]
+lab[, summary(lab_timegap_y)]
+
+lab_condensed <- lab %>% group_by(Group_Id, Loinc_Code, Test_Id, Test_Description, Specimen_Type) %>% 
+        summarise() %>% as.data.table()
+
+```
+
+## 4.1. ACTH 
+
+```{r}
+
+lab_condensed[grepl("(?i)acth", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)acth", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+acth_code <- unique(lab_condensed[Group_Id == "ACTH (Corticotropin)", Loinc_Code])
+acth_long <- lab[Loinc_Code == acth_code, ]
+
+acth_long[, .N, Reference_Units] # Appear to be all pg/ml
+acth_long[, acth := as.numeric(Result)]
+acth_long[is.na(acth), .N, Result] %>% datatable()
+acth_long[, summary(acth)] # Are values in 10-20k range plausible?
+
+```
+
+### 4.1.1. ACTH closest to last plasma date
+
+```{r}
+
+acth_long <- acth_long[!is.na(acth), ]
+acth_long[, acth_timegap_d_abs := abs(lab_timegap_d)]
+setkey(acth_long, EMPI, acth_timegap_d_abs)
+acth_closest <- acth_long[, head(.SD, 1), EMPI] 
+acth_closest[, .N, .(`acth_absolute_timegap<=7d` = acth_timegap_d_abs <= 7, 
+                     `acth_absolute_timegap<=1y` = abs(lab_timegap_y) <= 1)
+             ][order(`acth_absolute_timegap<=7d`, `acth_absolute_timegap<=1y`)]
+
+setnames(acth_closest, c("acth", "Lab_Date", "Reference_Units"), 
+         str_c(c("acth", "acth_date", "acth_unit"), "_closest_lastpl"))
+tmp_cols <- c("EMPI", str_c(c("acth", "acth_date", "acth_unit"), "_closest_lastpl"))
+pool <- merge(pool, acth_closest[, ..tmp_cols], by = "EMPI", all.x = T)
+pool[, has_acth_closest_lastpl := ifelse(!is.na(acth_closest_lastpl), 1, 0) %>% as.factor()]
+
+pool[, .N, has_acth_closest_lastpl]
+pool[, summary(acth_closest_lastpl)]
+pool[, summary(as.numeric(acth_date_closest_lastpl - last_plasma_date))]
+
+```
+
+### 4.1.2. ACTH within (+/-)1 year of last plasma date
+
+```{r}
+
+## Function to generate variables on ACTH under certain restriction
+
+acth_vars_fnc <- function(restriction, varname_suffix) {
+        acth_tmp <- eval(parse(text = str_c("acth_long[", restriction, ", ]")))
+        acth_per_subj <- acth_tmp[, .(n_acth_rec = .N, 
+                                      acth_all_values = str_c(acth, collapse = ";"), 
+                                      acth_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                      acth_median = median(acth), 
+                                      acth_min = min(acth), 
+                                      acth_max = max(acth), 
+                                      acth_mean = mean(acth)), EMPI]
+        acth_per_subj <- eval(parse(text = str_c("merge(acth_per_subj, acth_closest[", restriction, 
+                                                 ", .(EMPI, lab_timegap_d)], by = 'EMPI', all.x = T)")))
+        setnames(acth_per_subj, "lab_timegap_d", "acth_closest_timegap_d")
+        setnames(acth_per_subj, c("EMPI", str_c(colnames(acth_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, acth_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_acth_rec", varname_suffix, " := ifelse(!is.na(n_acth_rec", 
+                                varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on acth records from within (+/-)1 year of last plasma date
+
+pool <- acth_vars_fnc(restriction = "abs(lab_timegap_y) <= 1", varname_suffix = "_pm1y_lastpl")
+
+
+## Check median acth from within (+/-)1 year against acth closest to last plasma date
+
+pool[, .N, .(has_acth_closest_lastpl, has_acth_rec_pm1y_lastpl)]
+pool[, summary(acth_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = acth_closest_timegap_d_pm1y_lastpl), bins = 200)
+# ggplot(pool, aes(x = acth_closest_lastpl, y = acth_median_pm1y_lastpl)) + 
+#         geom_point(alpha = 0.5)
+ggplot(pool, aes(x = acth_closest_lastpl, y = acth_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 300) + ylim(0, 300)
+
+```
+
+### 4.1.3. ACTH within (+/-)2 years of last plasma date
+
+```{r}
+
+## Generate variables on acth records from within (+/-)2 years of last plasma date
+
+pool <- acth_vars_fnc(restriction = "abs(lab_timegap_y) <= 2", varname_suffix = "_pm2y_lastpl")
+
+
+## Check median acth from within (+/-)2 years against acth closest to last plasma date
+
+pool[, .N, .(has_acth_closest_lastpl, has_acth_rec_pm2y_lastpl)]
+pool[, summary(acth_closest_timegap_d_pm2y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = acth_closest_timegap_d_pm2y_lastpl), bins = 200)
+ggplot(pool, aes(x = acth_closest_lastpl, y = acth_median_pm2y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 300) + ylim(0, 300)
+
+```
+
+### 4.1.4. ACTH within (+/-)3 years of last plasma date
+
+```{r}
+
+## Generate variables on acth records from within (+/-)3 years of last plasma date
+
+pool <- acth_vars_fnc(restriction = "abs(lab_timegap_y) <= 3", varname_suffix = "_pm3y_lastpl")
+
+
+## Check median acth from within (+/-)3 years against acth closest to last plasma date
+
+pool[, .N, .(has_acth_closest_lastpl, has_acth_rec_pm3y_lastpl)]
+pool[, summary(acth_closest_timegap_d_pm3y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = acth_closest_timegap_d_pm3y_lastpl), bins = 200)
+ggplot(pool, aes(x = acth_closest_lastpl, y = acth_median_pm3y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 300) + ylim(0, 300)
+
+```
+
+## 4.2. Cortisol (not from urine)
+
+```{r}
+
+lab_condensed[grepl("(?i)cortisol", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)cortisol", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+cortisol_code <- unique(lab_condensed[Group_Id %in% c("Cortisol", "Cortisol (12am)", "Cortisol (AM specimen)", 
+                                                      "Cortisol, PM specimen", "Cortisol (1hr post ACTH)", 
+                                                      "Cortisol (30 min post ACTH)"), Loinc_Code])
+# Not including urine cortisol
+
+cortisol_long <- lab[Loinc_Code %in% cortisol_code, ]
+cortisol_long[, .N, Reference_Units][order(-N)]
+cortisol_long[, cortisol := case_when(Reference_Units %in% c("ug/dl", "ug/dL", "UG/DL", "mcg/dL", "MCG/DL") ~ as.numeric(Result), 
+                                      Reference_Units %in% c("ug/ml", "UG/ML", "ug/mL", "mcg/mL") ~ as.numeric(Result)*100, 
+                                      Reference_Units %in% c("ng/dL") ~ as.numeric(Result)*0.001)
+              ][, cortisol_unit := "ug/dl"] # Unify to ug/dl
+cortisol_long[is.na(cortisol), .N, Result] %>% datatable()
+cortisol_long[, summary(cortisol)] # Are values in 1-2k range plausible?
+
+
+## Separate regular cortisol from ACTH stim test cortisol
+
+cort_reg_long <- cortisol_long[!grepl("(?i)acth", Group_Id) & 
+                                 !grepl("(?i)acth stim|hour", Test_Description) & 
+                                   !grepl("(?i)min|hour|minutes|acth|cort stim|cosyntropin", Result_Text), ]
+# Exclude ACTH stim cortisol according to indications in Group_Id & Test_Description & Result_Text
+
+cort_stim_long <- cortisol_long[grepl("(?i)acth", Group_Id) | 
+                                  grepl("(?i)acth stim|hour", Test_Description) | 
+                                    grepl("(?i)min|hour|minutes|acth|cort stim|cosyntropin", Result_Text), ]
+# Only a total of 160 ACTH stim cortisol records
+
+```
+
+### 4.2.1. Cortisol closest to last plasma date
+
+```{r}
+
+cort_reg_long <- cort_reg_long[!is.na(cortisol), ]
+cort_reg_long[, cortisol_timegap_d_abs := abs(lab_timegap_d)]
+setkey(cort_reg_long, EMPI, cortisol_timegap_d_abs)
+cortisol_closest <- cort_reg_long[, head(.SD, 1), EMPI] 
+cortisol_closest[, .N, .(`cortisol_absolute_timegap<=7d` = cortisol_timegap_d_abs <= 7, 
+                         `cortisol_absolute_timegap<=1y` = abs(lab_timegap_y) <= 1)
+                 ][order(`cortisol_absolute_timegap<=7d`, `cortisol_absolute_timegap<=1y`)]
+
+setnames(cortisol_closest, c("cortisol", "Lab_Date", "cortisol_unit"), 
+         str_c(c("cortisol", "cortisol_date", "cortisol_unit"), "_closest_lastpl"))
+tmp_cols <- c("EMPI", str_c(c("cortisol", "cortisol_date", "cortisol_unit"), "_closest_lastpl"))
+pool <- merge(pool, cortisol_closest[, ..tmp_cols], by = "EMPI", all.x = T)
+pool[, has_cortisol_closest_lastpl := ifelse(!is.na(cortisol_closest_lastpl), 1, 0) %>% as.factor()]
+
+pool[, .N, has_cortisol_closest_lastpl]
+pool[, summary(cortisol_closest_lastpl)]
+pool[, summary(as.numeric(cortisol_date_closest_lastpl - last_plasma_date))]
+
+```
+
+### 4.2.2. Cortisol within (+/-)1 year of last plasma date
+
+```{r}
+
+## Function to generate variables on Cortisol under certain restriction
+
+cortisol_vars_fnc <- function(restriction, varname_suffix) {
+        cortisol_tmp <- eval(parse(text = str_c("cort_reg_long[", restriction, ", ]")))
+        cortisol_per_subj <- cortisol_tmp[, .(n_cortisol_rec = .N, 
+                                              cortisol_all_values = str_c(cortisol, collapse = ";"), 
+                                              cortisol_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                              cortisol_median = median(cortisol), 
+                                              cortisol_min = min(cortisol), 
+                                              cortisol_max = max(cortisol), 
+                                              cortisol_mean = mean(cortisol)), EMPI]
+        cortisol_per_subj <- eval(parse(text = str_c("merge(cortisol_per_subj, cortisol_closest[", restriction, 
+                                                     ", .(EMPI, lab_timegap_d)], by = 'EMPI', all.x = T)")))
+        setnames(cortisol_per_subj, "lab_timegap_d", "cortisol_closest_timegap_d")
+        setnames(cortisol_per_subj, c("EMPI", str_c(colnames(cortisol_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, cortisol_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_cortisol_rec", varname_suffix, " := ifelse(!is.na(n_cortisol_rec", 
+                                varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on cortisol records from within (+/-)1 year of last plasma date
+
+pool <- cortisol_vars_fnc(restriction = "abs(lab_timegap_y) <= 1", varname_suffix = "_pm1y_lastpl")
+
+
+## Check median cortisol from within (+/-)1 year against cortisol closest to last plasma date
+
+pool[, .N, .(has_cortisol_closest_lastpl, has_cortisol_rec_pm1y_lastpl)]
+pool[, summary(cortisol_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = cortisol_closest_timegap_d_pm1y_lastpl), bins = 200)
+# ggplot(pool, aes(x = cortisol_closest_lastpl, y = cortisol_median_pm1y_lastpl)) + 
+#         geom_point(alpha = 0.5) # The 810 value is likely unit entry error
+ggplot(pool, aes(x = cortisol_closest_lastpl, y = cortisol_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 100) + ylim(0, 100)
+
+```
+
+### 4.2.3. Cortisol within (+/-)2 years of last plasma date
+
+```{r}
+
+## Generate variables on cortisol records from within (+/-)2 years of last plasma date
+
+pool <- cortisol_vars_fnc(restriction = "abs(lab_timegap_y) <= 2", varname_suffix = "_pm2y_lastpl")
+
+
+## Check median cortisol from within (+/-)2 years against cortisol closest to last plasma date
+
+pool[, .N, .(has_cortisol_closest_lastpl, has_cortisol_rec_pm2y_lastpl)]
+pool[, summary(cortisol_closest_timegap_d_pm2y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = cortisol_closest_timegap_d_pm2y_lastpl), bins = 200)
+ggplot(pool, aes(x = cortisol_closest_lastpl, y = cortisol_median_pm2y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 100) + ylim(0, 100)
+
+```
+
+### 4.2.4. Cortisol within (+/-)3 years of last plasma date
+
+```{r}
+
+## Generate variables on cortisol records from within (+/-)3 years of last plasma date
+
+pool <- cortisol_vars_fnc(restriction = "abs(lab_timegap_y) <= 3", varname_suffix = "_pm3y_lastpl")
+
+
+## Check median cortisol from within (+/-)3 years against cortisol closest to last plasma date
+
+pool[, .N, .(has_cortisol_closest_lastpl, has_cortisol_rec_pm3y_lastpl)]
+pool[, summary(cortisol_closest_timegap_d_pm3y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = cortisol_closest_timegap_d_pm3y_lastpl), bins = 200)
+ggplot(pool, aes(x = cortisol_closest_lastpl, y = cortisol_median_pm3y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 100) + ylim(0, 100)
+
+```
+
+## 4.3. Eosinophil count
+
+```{r}
+
+lab_condensed[grepl("(?i)eos", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)eos", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+eos_code <- unique(lab_condensed[grepl("(?i)eos", Group_Id), Loinc_Code])
+
+eos_long <- lab[Loinc_Code %in% eos_code, ]
+eos_long[, .N, Reference_Units][order(-N)]
+eos_long[, eos := case_when(Reference_Units %in% c("K/uL", "th/cmm", "th/mm3", "K/UL", "K/MM3", "") ~ as.numeric(Result), 
+                            Reference_Units %in% c("/cumm", "/(MM3)", "/CUMM", "UL", "/uL") ~ as.numeric(Result)*0.001)
+         ][, eos_unit := "K/uL"] # Unify to K/uL
+eos_long[is.na(eos), .N, Result] %>% datatable()
+eos_long[, summary(eos)] 
+
+```
+
+### 4.3.1. Eosinophil closest to last plasma date
+
+```{r}
+
+eos_long <- eos_long[!is.na(eos), ]
+eos_long[, eos_timegap_d_abs := abs(lab_timegap_d)]
+setkey(eos_long, EMPI, eos_timegap_d_abs)
+eos_closest <- eos_long[, head(.SD, 1), EMPI] 
+eos_closest[, .N, .(`eos_absolute_timegap<=7d` = eos_timegap_d_abs <= 7, 
+                    `eos_absolute_timegap<=1y` = abs(lab_timegap_y) <= 1)
+            ][order(`eos_absolute_timegap<=7d`, `eos_absolute_timegap<=1y`)]
+
+setnames(eos_closest, c("eos", "Lab_Date", "eos_unit"), 
+         str_c(c("eos", "eos_date", "eos_unit"), "_closest_lastpl"))
+tmp_cols <- c("EMPI", str_c(c("eos", "eos_date", "eos_unit"), "_closest_lastpl"))
+pool <- merge(pool, eos_closest[, ..tmp_cols], by = "EMPI", all.x = T)
+pool[, has_eos_closest_lastpl := ifelse(!is.na(eos_closest_lastpl), 1, 0) %>% as.factor()]
+
+pool[, .N, has_eos_closest_lastpl]
+pool[, summary(eos_closest_lastpl)]
+pool[, summary(as.numeric(eos_date_closest_lastpl - last_plasma_date))]
+
+```
+
+### 4.3.2. Eosinophil within (+/-)1 year of last plasma date
+
+```{r}
+
+## Function to generate variables on Cortisol under certain restriction
+
+eos_vars_fnc <- function(restriction, varname_suffix) {
+        eos_tmp <- eval(parse(text = str_c("eos_long[", restriction, ", ]")))
+        eos_per_subj <- eos_tmp[, .(n_eos_rec = .N, 
+                                    eos_all_values = str_c(eos, collapse = ";"), 
+                                    eos_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                    eos_median = median(eos), 
+                                    eos_min = min(eos), 
+                                    eos_max = max(eos), 
+                                    eos_mean = mean(eos)), EMPI]
+        eos_per_subj <- eval(parse(text = str_c("merge(eos_per_subj, eos_closest[", restriction, 
+                                                ", .(EMPI, lab_timegap_d)], by = 'EMPI', all.x = T)")))
+        setnames(eos_per_subj, "lab_timegap_d", "eos_closest_timegap_d")
+        setnames(eos_per_subj, c("EMPI", str_c(colnames(eos_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, eos_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_eos_rec", varname_suffix, " := ifelse(!is.na(n_eos_rec", 
+                                varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on eos records from within (+/-)1 year of last plasma date
+
+pool <- eos_vars_fnc(restriction = "abs(lab_timegap_y) <= 1", varname_suffix = "_pm1y_lastpl")
+
+
+## Check median eos from within (+/-)1 year against eos closest to last plasma date
+
+pool[, .N, .(has_eos_closest_lastpl, has_eos_rec_pm1y_lastpl)]
+pool[, summary(eos_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = eos_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool, aes(x = eos_closest_lastpl, y = eos_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 5) + ylim(0, 5)
+
+```
+
+### 4.3.3. Eosinophil within (+/-)2 years of last plasma date
+
+```{r}
+
+## Generate variables on eos records from within (+/-)2 years of last plasma date
+
+pool <- eos_vars_fnc(restriction = "abs(lab_timegap_y) <= 2", varname_suffix = "_pm2y_lastpl")
+
+
+## Check median eos from within (+/-)2 years against eos closest to last plasma date
+
+pool[, .N, .(has_eos_closest_lastpl, has_eos_rec_pm2y_lastpl)]
+pool[, summary(eos_closest_timegap_d_pm2y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = eos_closest_timegap_d_pm2y_lastpl), bins = 200)
+ggplot(pool, aes(x = eos_closest_lastpl, y = eos_median_pm2y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 5) + ylim(0, 5)
+
+```
+
+### 4.3.4. Eosinophil within (+/-)3 years of last plasma date
+
+```{r}
+
+## Generate variables on eos records from within (+/-)3 years of last plasma date
+
+pool <- eos_vars_fnc(restriction = "abs(lab_timegap_y) <= 3", varname_suffix = "_pm3y_lastpl")
+
+
+## Check median eos from within (+/-)3 years against eos closest to last plasma date
+
+pool[, .N, .(has_eos_closest_lastpl, has_eos_rec_pm3y_lastpl)]
+pool[, summary(eos_closest_timegap_d_pm3y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = eos_closest_timegap_d_pm3y_lastpl), bins = 200)
+ggplot(pool, aes(x = eos_closest_lastpl, y = eos_median_pm3y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 5) + ylim(0, 5)
+
+```
+
+## 4.4. Total IgE
+
+```{r}
+
+lab_condensed[grepl("(?i)ige", Group_Id), ] %>% datatable()
+lab_condensed[grepl("(?i)ige", Group_Id), ][, .N, .(Group_Id, Loinc_Code)]
+ige_code <- unique(lab_condensed[grepl("(?i)ige", Group_Id), Loinc_Code])
+
+ige_long <- lab[Loinc_Code %in% ige_code, ]
+ige_long[, .N, Reference_Units][order(-N)]
+ige_long[, ige := case_when(Reference_Units %in% c("IU/ml", "IU/mL", "kU/L", "IU/ML", "U/ML", "") ~ as.numeric(Result), 
+                            Reference_Units %in% c("ng/ml") ~ as.numeric(Result)/2.4) # Ref: PMC3206235
+         ][, ige_unit := "kU/L"] # Unify to kU/L
+ige_long[is.na(ige), .N, Result] %>% datatable()
+ige_long[, summary(ige)] 
+
+```
+
+### 4.4.1. IgE closest to last plasma date
+
+```{r}
+
+ige_long <- ige_long[!is.na(ige), ]
+ige_long[, ige_timegap_d_abs := abs(lab_timegap_d)]
+setkey(ige_long, EMPI, ige_timegap_d_abs)
+ige_closest <- ige_long[, head(.SD, 1), EMPI] 
+ige_closest[, .N, .(`ige_absolute_timegap<=7d` = ige_timegap_d_abs <= 7, 
+                    `ige_absolute_timegap<=1y` = abs(lab_timegap_y) <= 1)
+            ][order(`ige_absolute_timegap<=7d`, `ige_absolute_timegap<=1y`)]
+
+setnames(ige_closest, c("ige", "Lab_Date", "ige_unit"), 
+         str_c(c("ige", "ige_date", "ige_unit"), "_closest_lastpl"))
+tmp_cols <- c("EMPI", str_c(c("ige", "ige_date", "ige_unit"), "_closest_lastpl"))
+pool <- merge(pool, ige_closest[, ..tmp_cols], by = "EMPI", all.x = T)
+pool[, has_ige_closest_lastpl := ifelse(!is.na(ige_closest_lastpl), 1, 0) %>% as.factor()]
+
+pool[, .N, has_ige_closest_lastpl]
+pool[, summary(ige_closest_lastpl)]
+pool[, summary(as.numeric(ige_date_closest_lastpl - last_plasma_date))]
+
+```
+
+### 4.4.2. IgE within (+/-)1 year of last plasma date
+
+```{r}
+
+## Function to generate variables on Cortisol under certain restriction
+
+ige_vars_fnc <- function(restriction, varname_suffix) {
+        ige_tmp <- eval(parse(text = str_c("ige_long[", restriction, ", ]")))
+        ige_per_subj <- ige_tmp[, .(n_ige_rec = .N, 
+                                    ige_all_values = str_c(ige, collapse = ";"), 
+                                    ige_all_dates = str_c(Lab_Date, collapse = ";"), 
+                                    ige_median = median(ige), 
+                                    ige_min = min(ige), 
+                                    ige_max = max(ige), 
+                                    ige_mean = mean(ige)), EMPI]
+        ige_per_subj <- eval(parse(text = str_c("merge(ige_per_subj, ige_closest[", restriction, 
+                                                ", .(EMPI, lab_timegap_d)], by = 'EMPI', all.x = T)")))
+        setnames(ige_per_subj, "lab_timegap_d", "ige_closest_timegap_d")
+        setnames(ige_per_subj, c("EMPI", str_c(colnames(ige_per_subj)[-1], varname_suffix)))
+        pool <- merge(pool, ige_per_subj, by = "EMPI", all.x = T)
+        eval(parse(text = str_c("pool[, has_ige_rec", varname_suffix, " := ifelse(!is.na(n_ige_rec", 
+                                varname_suffix, "), 1, 0) %>% as.factor()]")))
+        return(pool)
+}
+
+
+## Generate variables on ige records from within (+/-)1 year of last plasma date
+
+pool <- ige_vars_fnc(restriction = "abs(lab_timegap_y) <= 1", varname_suffix = "_pm1y_lastpl")
+
+
+## Check median ige from within (+/-)1 year against ige closest to last plasma date
+
+pool[, .N, .(has_ige_closest_lastpl, has_ige_rec_pm1y_lastpl)]
+pool[, summary(ige_closest_timegap_d_pm1y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = ige_closest_timegap_d_pm1y_lastpl), bins = 200)
+ggplot(pool, aes(x = ige_closest_lastpl, y = ige_median_pm1y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 20000) + ylim(0, 20000)
+
+```
+
+### 4.4.3. IgE within (+/-)2 years of last plasma date
+
+```{r}
+
+## Generate variables on ige records from within (+/-)2 years of last plasma date
+
+pool <- ige_vars_fnc(restriction = "abs(lab_timegap_y) <= 2", varname_suffix = "_pm2y_lastpl")
+
+
+## Check median ige from within (+/-)2 years against ige closest to last plasma date
+
+pool[, .N, .(has_ige_closest_lastpl, has_ige_rec_pm2y_lastpl)]
+pool[, summary(ige_closest_timegap_d_pm2y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = ige_closest_timegap_d_pm2y_lastpl), bins = 200)
+ggplot(pool, aes(x = ige_closest_lastpl, y = ige_median_pm2y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 20000) + ylim(0, 20000)
+
+```
+
+### 4.4.4. IgE within (+/-)3 years of last plasma date
+
+```{r}
+
+## Generate variables on ige records from within (+/-)3 years of last plasma date
+
+pool <- ige_vars_fnc(restriction = "abs(lab_timegap_y) <= 3", varname_suffix = "_pm3y_lastpl")
+
+
+## Check median ige from within (+/-)3 years against ige closest to last plasma date
+
+pool[, .N, .(has_ige_closest_lastpl, has_ige_rec_pm3y_lastpl)]
+pool[, summary(ige_closest_timegap_d_pm3y_lastpl)]
+ggplot(pool) + geom_histogram(aes(x = ige_closest_timegap_d_pm3y_lastpl), bins = 200)
+ggplot(pool, aes(x = ige_closest_lastpl, y = ige_median_pm3y_lastpl)) + 
+        geom_point(alpha = 0.5) + 
+        xlim(0, 20000) + ylim(0, 20000)
+
+```
+
+# 5. Save selection pool data
+
+```{r}
+
+fwrite(pool, here(res_dir, "selection_pool.csv"))
+
+```
+
+# 6. Session info
+
+```{r}
+
+sessionInfo()
+
+```
